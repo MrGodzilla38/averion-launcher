@@ -1,0 +1,10 @@
+[package]
+name = "averion-launcher"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A native Minecraft Java Edition launcher"
+
+[dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "image-without-codecs", "thread-pool", "x11", "wayland"] }
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }

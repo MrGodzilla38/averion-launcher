@@ -1,0 +1,12 @@
+# Cargo build output
+/target/
+
+# Rust formatting backups
+*.rs.bk
+
+# Windows Explorer metadata
+Thumbs.db
+Desktop.ini
+
+# Local agent skills
+/.agents/

@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+
+use super::installation::Installation;
 use crate::{
     catalog::{VERSIONS, families, patches},
     message::{Control, Page},
+    mojang::Runtime,
 };
 
 pub struct State {
@@ -11,6 +15,8 @@ pub struct State {
     pub menu: bool,
     pub version_family: Option<usize>,
     pub motion: bool,
+    pub installation: Installation,
+    pub verified_versions: HashMap<&'static str, Runtime>,
     details_visible: bool,
 }
 
@@ -27,6 +33,8 @@ impl Default for State {
             menu: false,
             version_family: None,
             motion: true,
+            installation: Installation::default(),
+            verified_versions: HashMap::new(),
             details_visible: false,
         }
     }
@@ -58,7 +66,16 @@ impl State {
             order.push(Control::Profile);
         }
         match self.page {
-            Page::Home => order.extend([Control::VersionPreview, Control::Details, Control::News]),
+            Page::Home => {
+                order.push(Control::VersionPreview);
+                if !self.installation.is_active() {
+                    order.push(Control::StartDownload);
+                }
+                if self.installation.has_action() {
+                    order.push(Control::DownloadAction);
+                }
+                order.extend([Control::Details, Control::News]);
+            }
             Page::Versions => order.extend((0..families().count()).map(Control::VersionFamily)),
             Page::Settings => order.push(Control::Motion),
             _ => {}
@@ -153,6 +170,7 @@ impl State {
                 self.motion = !self.motion;
             }
             Control::VersionPreview => self.navigate(Page::Versions),
+            Control::StartDownload | Control::DownloadAction => {}
         }
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
-use iced::widget::column;
+use crate::{app::installation::Installation, download::Stage};
+use iced::widget::{column, progress_bar};
 
 fn version_preview(state: &State) -> View {
     let entry = &VERSIONS[state.selected];
@@ -87,17 +88,9 @@ pub(super) fn view(state: &State) -> View {
         .size(14),
         false,
     );
-    let mut actions = column![
-        launch_control(
-            compact,
-            "▷   Launch",
-            "Game launching is unavailable in this preview.",
-            None
-        ),
-        details
-    ]
-    .align_x(Alignment::Center)
-    .spacing(4);
+    let mut actions = column![launch_control(state), details]
+        .align_x(Alignment::Center)
+        .spacing(4);
     if state.details_visible() {
         actions = actions.push(
             text(concat!(
@@ -133,19 +126,18 @@ pub(super) fn view(state: &State) -> View {
         .into()
 }
 
-/// Presentation only. The workflow owner supplies its stage label, explanation
-/// and an action only when that operation is available.
-fn launch_control(
-    compact: bool,
-    label: &'static str,
-    status: &'static str,
-    intent: Option<Message>,
-) -> View {
-    let action = button(container(bold(label, 20)).center(Fill))
-        .width(if compact { 210 } else { 246 })
-        .height(if compact { 44 } else { 52 })
-        .on_press_maybe(intent)
-        .style(|_, state| {
+fn launch_control(state: &State) -> View {
+    let active = state.installation.is_active();
+    let width = if state.compact { 210 } else { 246 };
+    let label = text(if active { "INSTALLING" } else { "DOWNLOAD" })
+        .size(20)
+        .font(iced::Font::with_name("Minecraft"));
+    let focused = state.focus == Control::StartDownload;
+    let main = button(container(label).center(Fill))
+        .width(width)
+        .height(if state.compact { 44 } else { 52 })
+        .on_press_maybe((!active).then_some(Message::Press(Control::StartDownload)))
+        .style(move |_, state| {
             let (fill, ink) = match state {
                 button::Status::Disabled => (SELECTED, MUTED),
                 button::Status::Hovered => (PRIMARY_HOVER, PANEL),
@@ -156,15 +148,103 @@ fn launch_control(
                 background: Some(fill.into()),
                 text_color: ink,
                 border: iced::Border {
-                    color: BLUE,
-                    width: 1.,
+                    color: if focused { CYAN } else { BLUE },
+                    width: if focused { 2. } else { 1. },
                     radius: RADIUS.into(),
                 },
                 ..Default::default()
             }
         });
-    column![action, text(status).size(14).color(MUTED)]
-        .spacing(4)
-        .align_x(Alignment::Center)
+    let controls = column![main].spacing(4).align_x(Alignment::Center);
+    let controls = match &state.installation {
+        Installation::Idle => {
+            let version = VERSIONS[state.selected].id;
+            let status = if let Some(runtime) = state.verified_versions.get(version) {
+                format!(
+                    "Minecraft {version} files verified. Java {} ready.",
+                    runtime.major
+                )
+            } else {
+                "Download and verify the selected Minecraft version.".into()
+            };
+            controls.push(text(status).size(14).color(MUTED))
+        }
+        Installation::Failed { error, .. } => controls
+            .push(text(error.to_string()).size(14).color(MUTED))
+            .push(download_action(state, "Retry")),
+        Installation::Active {
+            progress, cancel, ..
+        } => {
+            let step = if progress.count > 1
+                && (progress.overall.is_none() || progress.stage == Stage::Extracting)
+            {
+                format!(" ({}/{})", progress.step, progress.count)
+            } else {
+                String::new()
+            };
+            let status = if cancel.is_none() {
+                format!("Cancelling {}…", progress.component)
+            } else {
+                match progress.stage {
+                    Stage::Resolving => format!("Resolving {} metadata…", progress.component),
+                    Stage::Extracting => format!("Extracting {}…{step}", progress.component),
+                    Stage::Checking => format!("Checking {}…{step}", progress.component),
+                    Stage::Receiving { .. } => format!("Downloading {}…{step}", progress.component),
+                }
+            };
+            let indicator =
+                if let Some(overall) = progress.overall.filter(|totals| totals.total_bytes > 0) {
+                    format!(
+                        "{}% total · {}/{} files verified",
+                        u128::from(overall.bytes) * 100 / u128::from(overall.total_bytes),
+                        overall.files,
+                        overall.total_files,
+                    )
+                } else {
+                    match progress.stage {
+                        Stage::Receiving {
+                            received,
+                            total: Some(total),
+                        } if total > 0 => {
+                            format!("{}%", u128::from(received) * 100 / u128::from(total))
+                        }
+                        Stage::Receiving { received, .. } => format!("{received} bytes received"),
+                        Stage::Resolving | Stage::Checking | Stage::Extracting => String::new(),
+                    }
+                };
+            let bar: Option<View> = if let Some(percent) = progress.percent() {
+                Some(
+                    progress_bar(0. ..=100., percent)
+                        .girth(6)
+                        .length(width)
+                        .into(),
+                )
+            } else if !matches!(progress.stage, Stage::Resolving) {
+                Some(
+                    container(Space::new())
+                        .height(6)
+                        .width(width)
+                        .style(|_| surface(SELECTED, EDGE, 3.))
+                        .into(),
+                )
+            } else {
+                None
+            };
+            controls
+                .extend(bar)
+                .push(text(status).size(14).color(MUTED))
+                .extend(
+                    (!indicator.is_empty())
+                        .then(|| View::from(text(indicator).size(13).color(MUTED))),
+                )
+                .extend(cancel.is_some().then(|| download_action(state, "Cancel")))
+        }
+    };
+    controls.into()
+}
+
+fn download_action(state: &State, label: &'static str) -> View {
+    action(state, Control::DownloadAction, text(label).size(14), false)
+        .height(44)
         .into()
 }

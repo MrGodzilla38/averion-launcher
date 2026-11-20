@@ -1,12 +1,14 @@
 # Averion Launcher
 
-A native Rust desktop launcher for Minecraft Java Edition, targeting Vanilla on x86_64 Linux and Windows. Phase 03 opens a blue/cyan launcher shell with seven destinations, original offline scenery, a selected-version preview linking to Versions and a session-only Reduced motion control. Click **Startup details** or press **F1** to inspect the interface and renderer. Game installation, accounts and launching belong to later phases.
+A native Rust desktop launcher for Minecraft Java Edition, targeting Vanilla on x86_64 Linux and Windows. The launcher shell has seven destinations, original offline scenery, a selected-version preview linking to Versions and a session-only Reduced motion control. Click **Startup details** or press **F1** to inspect the interface and renderer.
+
+Select a Minecraft release and press **Download** on Home. Averion verifies the selected release's game files, extracts its native libraries, and selects a compatible 64-bit Java runtime using Mojang's version metadata. It can reuse system Java or provision Mojang's runtime under `.averion/java/`. Progress, Cancel, and Retry are available from Home. Averion stores its files under `~/.averion/` on Linux and `%APPDATA%\.averion\` on Windows. Accounts and game launching belong to later phases. [Download and Java architecture](docs/ARCHITECTURE.md#java-runtime-management)
 
 ## Build and run
 
 Install stable Rust with Cargo and rustup. The repository requests rustfmt and Clippy. Iced itself requires Rust 1.88 or newer. Use current stable for the locked application dependencies.
 
-- **Linux** is the primary development platform. Install a C compiler/linker, pkg-config, X11/XCB, Wayland and xkbcommon development libraries, and system fonts. Run within a Wayland or X11 desktop session. On Ubuntu 24.04 the exact package installation command is in the [CI workflow](.github/workflows/ci.yml).
+- **Linux** is the primary development platform. Install a C compiler/linker, pkg-config, OpenSSL development libraries and a system CA bundle, X11/XCB, Wayland and xkbcommon development libraries, and system fonts. Run within a Wayland or X11 desktop session. On Ubuntu 24.04 the exact package installation command is in the [CI workflow](.github/workflows/ci.yml).
 - **Windows** uses the x86_64 MSVC Rust toolchain, Visual Studio C++ Build Tools and a Windows SDK. The Windows CI runner includes the native toolchain.
 
 ```sh
@@ -14,6 +16,7 @@ cargo run --locked
 cargo fmt --check
 cargo test --locked
 cargo check --locked
+cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 ```
 

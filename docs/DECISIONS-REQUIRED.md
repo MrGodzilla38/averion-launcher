@@ -2,7 +2,7 @@
 
 Phase 02 decision record. Rust, Cargo, the single native application, Iced 0.14, tiny-skia, the dark Modern Gaming direction, x86_64 Linux/Windows and the initial Vanilla scope are established. Phase 02 implemented the approved keyboard and state extractions. The options below for future features still require separate review. A format preference does not approve a parser, dependency or storage implementation.
 
-Phase 03 superseded the route deferral and enabled Iced image handles without codecs. Remaining backend and persistence decisions are open. [Current decisions](DESIGN-DECISIONS.md)
+Phase 03 superseded the route deferral and enabled Iced image handles without codecs. Phase 05 superseded the historical data location and transport recommendations below. It established `~/.averion/` and `%APPDATA%\.averion\` and selected Reqwest with native TLS on Iced's Tokio executor. Serde JSON covers Mojang metadata. The public settings format and other persistence decisions remain open. [Current architecture](ARCHITECTURE.md)
 
 ## Shell choices reviewed in Phase 02
 

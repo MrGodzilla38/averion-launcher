@@ -281,7 +281,7 @@ fn cached_metadata_builds_a_verified_plan_for_only_the_selected_version() {
 }
 
 #[test]
-#[ignore = "downloads and verifies the official 1.16 game files in a temporary directory"]
+#[ignore = "downloads and verifies the official 1.16.5 Fabric installation in a temporary directory"]
 fn official_https_complete_installation() {
     use std::sync::{
         Arc,
@@ -299,11 +299,11 @@ fn official_https_complete_installation() {
         let (_sender, cancel) = download::cancellation();
         let report = |_: Progress| future::ready(()).boxed();
         mojang
-            .install_in("1.16", &directory, false, &cancel, &report)
+            .install_in("1.16.5", &directory, false, &cancel, &report)
             .await
             .unwrap();
-        let version = directory.version_directory("1.16").unwrap();
-        assert!(version.join("1.16.jar").is_file());
+        let version = directory.version_directory("1.16.5").unwrap();
+        assert!(version.join("1.16.5.jar").is_file());
         assert!(
             fs::read_dir(version.join("natives"))
                 .unwrap()
@@ -322,7 +322,7 @@ fn official_https_complete_installation() {
             }
         };
         mojang
-            .install_in("1.16", &directory, false, &cancel, &report)
+            .install_in("1.16.5", &directory, false, &cancel, &report)
             .await
             .unwrap();
         assert!(!network_read.load(Ordering::Relaxed));
@@ -439,6 +439,7 @@ fn prepares_legacy_game_and_detects_same_size_classpath_damage() {
         },
         natives: vec![],
         log_config: None,
+        fabric: Some(fabric::Fabric::fixture()),
     };
     record::write(&version_dir, SELECTED, &metadata, &record).unwrap();
     let prepared = prepare(&directory, SELECTED).unwrap();
@@ -447,7 +448,16 @@ fn prepares_legacy_game_and_detects_same_size_classpath_damage() {
         prepared.legacy.as_deref(),
         Some("--username ${auth_player_name}")
     );
-    assert_eq!(prepared.classpath, [client, library.clone()]);
+    assert_eq!(prepared.main_class, fabric::MAIN_CLASS);
+    assert_eq!(&prepared.classpath[1..], [client, library.clone()]);
+    for (path, contents) in std::iter::once(&prepared.classpath[0])
+        .chain(&prepared.managed_mods)
+        .zip([b"loader".as_slice(), b"api", b"client"])
+    {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    directory.prepare_user_mods(SELECTED).unwrap();
     let (_keep_active, cancel) = download::cancellation();
     verify(&prepared, &cancel).unwrap();
     fs::write(&library, b"bad").unwrap();

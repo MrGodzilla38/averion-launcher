@@ -20,13 +20,13 @@ pub const VERSIONS: &[Version] = versions![
     "1.19", "The Wild Update" => ["1.19.4", "1.19.3", "1.19.2", "1.19.1", "1.19"],
     "1.18", "Caves & Cliffs: Part II" => ["1.18.2", "1.18.1", "1.18"],
     "1.17", "Caves & Cliffs: Part I" => ["1.17.1", "1.17"],
-    "1.16", "Nether Update" => ["1.16.5", "1.16.4", "1.16.3", "1.16.2", "1.16.1", "1.16"],
+    "1.16", "Nether Update" => ["1.16.5"],
 ];
 
 pub fn families() -> impl Iterator<Item = &'static Version> {
-    VERSIONS
-        .iter()
-        .filter(|version| version.id == version.cover)
+    VERSIONS.iter().enumerate().filter_map(|(index, version)| {
+        (index == 0 || VERSIONS[index - 1].cover != version.cover).then_some(version)
+    })
 }
 
 pub fn patches(family: &'static str) -> impl Iterator<Item = (usize, &'static Version)> {

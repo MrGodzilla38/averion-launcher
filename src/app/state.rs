@@ -22,6 +22,7 @@ pub struct State {
     pub account_name: Option<String>,
     pub account_input: String,
     pub account_status: String,
+    pub mods_status: String,
     pub saving_account: bool,
     details_visible: bool,
 }
@@ -47,6 +48,7 @@ impl Default for State {
             account_name: None,
             account_input: String::new(),
             account_status: String::new(),
+            mods_status: String::new(),
             saving_account: false,
             details_visible: false,
         }
@@ -67,7 +69,7 @@ impl State {
 
     pub fn tabs(&self) -> Vec<Control> {
         if let Some(family) = self.version_family {
-            let cover = families().nth(family).unwrap().id;
+            let cover = families().nth(family).unwrap().cover;
             return std::iter::once(Control::CloseVersions)
                 .chain(patches(cover).map(|(i, _)| Control::Version(i)))
                 .collect();
@@ -94,6 +96,13 @@ impl State {
                 order.extend([Control::Details, Control::News]);
             }
             Page::Versions => order.extend((0..families().count()).map(Control::VersionFamily)),
+            Page::Mods => {
+                order.extend([Control::OpenModsFolder, Control::BrowseMods]);
+                if self.home_action_enabled() && self.installed.contains(VERSIONS[self.selected].id)
+                {
+                    order.push(Control::UpdateFabric);
+                }
+            }
             Page::Settings => order.push(Control::Motion),
             Page::Accounts if !self.loading_local && !self.saving_account => {
                 order.extend([Control::OfflineName, Control::SaveOffline]);
@@ -136,7 +145,7 @@ impl State {
             Page::Home => Control::VersionPreview,
             Page::Versions => Control::VersionFamily(
                 families()
-                    .position(|family| family.id == VERSIONS[self.selected].cover)
+                    .position(|family| family.cover == VERSIONS[self.selected].cover)
                     .unwrap(),
             ),
             Page::Settings => Control::Motion,
@@ -162,10 +171,10 @@ impl State {
                     && let Some(family) = families().nth(i)
                 {
                     self.version_family = Some(i);
-                    self.focus = if VERSIONS[self.selected].cover == family.id {
+                    self.focus = if VERSIONS[self.selected].cover == family.cover {
                         Control::Version(self.selected)
                     } else {
-                        Control::Version(patches(family.id).next().unwrap().0)
+                        Control::Version(patches(family.cover).next().unwrap().0)
                     };
                 }
             }
@@ -193,7 +202,10 @@ impl State {
             Control::StartDownload
             | Control::DownloadAction
             | Control::OfflineName
-            | Control::SaveOffline => {}
+            | Control::SaveOffline
+            | Control::UpdateFabric
+            | Control::OpenModsFolder
+            | Control::BrowseMods => {}
         }
     }
 }
@@ -209,10 +221,10 @@ mod tests {
             let initial = state.selected;
             assert_eq!(super::VERSIONS[initial].id, "1.20");
             let initial_family = super::families()
-                .position(|family| family.id == "1.20")
+                .position(|family| family.cover == "1.20")
                 .unwrap();
             let nether_family = super::families()
-                .position(|family| family.id == "1.16")
+                .position(|family| family.cover == "1.16")
                 .unwrap();
             state.press(entry);
             assert_eq!(

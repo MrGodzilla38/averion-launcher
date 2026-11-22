@@ -181,9 +181,9 @@ fn launch_control(state: &State) -> View {
             } else if state.loading_local {
                 "Reading local installations…".into()
             } else if installed {
-                format!("Minecraft {version} is installed.")
+                format!("Minecraft {version} with Fabric is installed.")
             } else {
-                "Download and verify the selected Minecraft version.".into()
+                "Download the selected Minecraft release with Fabric.".into()
             };
             controls.push(text(status).size(14).color(MUTED))
         }

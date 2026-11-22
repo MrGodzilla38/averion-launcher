@@ -91,3 +91,44 @@ pub(super) fn save_account(name: &str) -> Result<String, String> {
         .map(|account| account.name().to_owned())
         .map_err(|error| format!("Could not save the offline account ({error})."))
 }
+
+pub(super) fn open_mods(version: &str, browse: bool) -> Result<(), String> {
+    use std::{ffi::OsStr, process::Command};
+
+    let open = |target: &OsStr| {
+        #[cfg(target_os = "linux")]
+        let mut command = Command::new("xdg-open");
+        #[cfg(windows)]
+        let mut command = if browse {
+            Command::new("rundll32.exe")
+        } else {
+            Command::new("explorer.exe")
+        };
+        #[cfg(windows)]
+        if browse {
+            command.arg("url.dll,FileProtocolHandler");
+        }
+        let status = command
+            .arg(target)
+            .status()
+            .map_err(|error| error.to_string())?;
+        // Explorer returns 1 for successful handoff to an existing shell.
+        if status.success() || (cfg!(windows) && !browse && status.code() == Some(1)) {
+            Ok(())
+        } else {
+            Err(format!("Could not open the mods location ({status})."))
+        }
+    };
+    if browse {
+        open(OsStr::new("https://modrinth.com/mods"))
+    } else {
+        let directory = GameDirectory::discover().map_err(|error| error.to_string())?;
+        directory
+            .prepare_config()
+            .map_err(|error| error.to_string())?;
+        let folder = directory
+            .prepare_user_mods(version)
+            .map_err(|error| error.to_string())?;
+        open(folder.as_os_str())
+    }
+}

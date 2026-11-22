@@ -1,6 +1,6 @@
 use crate::download;
 use futures::TryStreamExt;
-use reqwest::{Client, StatusCode, Url, redirect, tls};
+use reqwest::{Client, StatusCode, Url, header::LOCATION, redirect, tls};
 use std::{
     fmt, io,
     sync::{Arc, OnceLock},
@@ -20,6 +20,7 @@ pub(crate) enum Error {
     Transport,
     Status(StatusCode),
     TooLarge,
+    InvalidRedirect,
 }
 
 impl fmt::Display for Error {
@@ -28,8 +29,9 @@ impl fmt::Display for Error {
             Self::Initialize => f.write_str("Could not initialize HTTPS"),
             Self::Timeout => f.write_str("The HTTPS request timed out"),
             Self::Transport => f.write_str("Could not complete the HTTPS request"),
-            Self::Status(status) => write!(f, "Mojang returned HTTP {}", status.as_u16()),
-            Self::TooLarge => f.write_str("Mojang metadata exceeds the size limit"),
+            Self::Status(status) => write!(f, "Download server returned HTTP {}", status.as_u16()),
+            Self::InvalidRedirect => f.write_str("Invalid GitHub release asset redirect"),
+            Self::TooLarge => f.write_str("Download metadata exceeds the size limit"),
         }
     }
 }
@@ -84,17 +86,75 @@ impl Https {
         Ok(bytes)
     }
 
+    pub(crate) async fn size(&self, url: Url) -> Result<u64, Error> {
+        let response = self
+            .client()?
+            .head(url)
+            .timeout(METADATA_TIMEOUT)
+            .send()
+            .await
+            .map_err(request_error)?;
+        if response.status() != StatusCode::OK {
+            return Err(Error::Status(response.status()));
+        }
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .ok_or(Error::Transport)
+    }
+
     pub(crate) async fn download(&self, url: Url) -> io::Result<download::Response> {
         let response = self.get(url, DOWNLOAD_TIMEOUT).await.map_err(io_error)?;
-        let total = response.content_length();
-        let reader = response
-            .bytes_stream()
-            .map_err(|error| io_error(request_error(error)))
-            .into_async_read();
-        Ok(download::Response {
-            body: Box::new(reader),
-            total,
-        })
+        Ok(download_response(response))
+    }
+
+    pub(crate) async fn github_release_asset(&self, url: Url) -> io::Result<download::Response> {
+        let response = self
+            .client()
+            .map_err(io_error)?
+            .get(url)
+            .timeout(DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| io_error(request_error(error)))?;
+        let response = match response.status() {
+            StatusCode::OK => response,
+            StatusCode::FOUND | StatusCode::TEMPORARY_REDIRECT => {
+                let target = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| Url::parse(value).ok())
+                    .filter(github_asset_target)
+                    .ok_or_else(|| io_error(Error::InvalidRedirect))?;
+                self.get(target, DOWNLOAD_TIMEOUT).await.map_err(io_error)?
+            }
+            status => return Err(io_error(Error::Status(status))),
+        };
+        Ok(download_response(response))
+    }
+}
+
+fn github_asset_target(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("release-assets.githubusercontent.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.fragment().is_none()
+}
+
+fn download_response(response: reqwest::Response) -> download::Response {
+    let total = response.content_length();
+    let reader = response
+        .bytes_stream()
+        .map_err(|error| io_error(request_error(error)))
+        .into_async_read();
+    download::Response {
+        body: Box::new(reader),
+        total,
     }
 }
 

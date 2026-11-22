@@ -3,14 +3,15 @@
 //! The record is written atomically after a successful install and is the
 //! source of truth for readiness checks and launch-time validation. It stores
 //! no secrets: only the verified metadata checksum, the Java runtime that was
-//! resolved, the assembled native binaries and the logging configuration id.
+//! resolved, the assembled native binaries, the logging configuration ID and
+//! the verified Fabric stack.
 //!
 //! Two launcher-owned files live in the version directory:
 //! - `<id>.json` — the verified Mojang version metadata, so launches never
 //!   trust the network or an unverified cache entry;
 //! - `averion.json` — this record, whose `metadata_sha1` pins the metadata.
 
-use super::{Error, Runtime, VERSION_LIMIT, hex_sha1, safe_path};
+use super::{Error, Runtime, VERSION_LIMIT, fabric::Fabric, hex_sha1, safe_path};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::{
@@ -19,7 +20,7 @@ use std::{
     path::Path,
 };
 
-pub(super) const SCHEMA: u32 = 1;
+pub(super) const SCHEMA: u32 = 2;
 pub(super) const FILE: &str = "averion.json";
 const RECORD_LIMIT: usize = 64 * 1024;
 
@@ -35,6 +36,8 @@ pub(crate) struct Record {
     pub(crate) natives: Vec<NativeEntry>,
     /// Id of the logging configuration file, when the version declares one.
     pub(crate) log_config: Option<String>,
+    #[serde(default)]
+    pub(super) fabric: Option<Fabric>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +85,9 @@ pub(crate) fn load(version_dir: &Path) -> Result<Option<Record>, Error> {
     }
     let record: Record =
         serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("installation record format"))?;
+    if record.schema == 1 && record.fabric.is_none() {
+        return Ok(None);
+    }
     if record.schema != SCHEMA || record.version.is_empty() || record.version.len() > 64 {
         return Err(Error::Invalid("installation record schema"));
     }
@@ -117,6 +123,11 @@ pub(crate) fn load(version_dir: &Path) -> Result<Option<Record>, Error> {
     {
         return Err(Error::Invalid("installation record logging id"));
     }
+    record
+        .fabric
+        .as_ref()
+        .ok_or(Error::Invalid("installation record is missing Fabric"))?
+        .validate(&record.version)?;
     Ok(Some(record))
 }
 
@@ -180,7 +191,7 @@ mod tests {
             metadata_sha1: "0".repeat(40),
             runtime: Runtime {
                 executable: Path::new(if cfg!(windows) {
-                    r"C:\Javain\java.exe"
+                    r"C:\Java\bin\java.exe"
                 } else {
                     "/opt/java/bin/java"
                 })
@@ -193,7 +204,46 @@ mod tests {
                 sha1: "a".repeat(40),
             }],
             log_config: Some("client-1.21.2.xml".to_owned()),
+            fabric: Some(Fabric::fixture()),
         }
+    }
+
+    #[test]
+    fn failed_update_preserves_the_last_verified_fabric_record() {
+        let base = tempfile::tempdir().unwrap();
+        let original = b"verified metadata";
+        let mut installed = record("1.20");
+        installed.metadata_sha1 = hex_sha1(&Sha1::digest(original).into());
+        write(base.path(), "1.20", original, &installed).unwrap();
+
+        let mut update = installed.clone();
+        update.fabric.as_mut().unwrap().loader = "0.20.2".into();
+        let error = write(base.path(), "1.20", b"incomplete update", &update).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Invalid("installation record metadata digest")
+        ));
+        assert_eq!(load(base.path()).unwrap(), Some(installed));
+    }
+
+    #[test]
+    fn legacy_record_stays_on_disk_but_requires_fabric_installation() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join(FILE);
+        let mut legacy = record("1.20");
+        legacy.schema = 1;
+        legacy.fabric = None;
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(load(base.path()).unwrap().is_none());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+
+        legacy.schema = SCHEMA;
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(matches!(
+            load(base.path()),
+            Err(Error::Invalid("installation record is missing Fabric"))
+        ));
     }
 
     #[test]

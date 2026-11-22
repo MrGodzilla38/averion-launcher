@@ -124,6 +124,18 @@ impl GameDirectory {
         &self.root
     }
 
+    /// Manual mods are isolated by game version while saves keep their existing root.
+    pub(crate) fn user_mods(&self, version: &str) -> PathBuf {
+        self.root.join("profiles").join(version).join("mods")
+    }
+
+    pub(crate) fn prepare_user_mods(&self, version: &str) -> io::Result<PathBuf> {
+        checked_subdirectory(
+            &self.root,
+            &Path::new("profiles").join(version).join("mods"),
+        )
+    }
+
     pub(crate) fn asset_index(&self, id: &str) -> PathBuf {
         self.root.join("assets/indexes").join(format!("{id}.json"))
     }

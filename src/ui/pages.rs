@@ -19,7 +19,7 @@ pub(super) fn view(state: &State) -> View {
         Page::Versions => {
             let columns = version_columns(state.compact);
             let cards = crate::catalog::families().enumerate().map(|(i, entry)| {
-                let selected = entry.id == VERSIONS[state.selected].cover;
+                let selected = entry.cover == VERSIONS[state.selected].cover;
                 let cover = image(art::version_art(entry.cover).card.clone())
                     .width(Fill)
                     .height(if state.compact { 102 } else { 148 })
@@ -31,7 +31,7 @@ pub(super) fn view(state: &State) -> View {
                     column![
                         cover,
                         row![
-                            bold(entry.id, 20),
+                            bold(entry.cover, 20),
                             Space::new().width(Fill),
                             text(if selected { "Selected" } else { "" })
                                 .size(13)
@@ -68,11 +68,8 @@ pub(super) fn view(state: &State) -> View {
         }
         Page::Mods => (
             "Mods",
-            "Planned for a future release.",
-            note(
-                "Vanilla Minecraft",
-                "Mod loaders and mod management are unavailable.",
-            ),
+            "Manage Fabric mods for the selected Minecraft release.",
+            mods(state),
         ),
         Page::Accounts => (
             "Accounts",
@@ -135,6 +132,39 @@ pub(super) fn view(state: &State) -> View {
         .center_x(Fill)
         .into()
 }
+fn mods(state: &State) -> View {
+    let version = VERSIONS[state.selected].id;
+    let installed = state.installed.contains(version);
+    let mut content = column![
+        bold(format!("Minecraft {version} · Fabric"), 18),
+        text("Averion manages Fabric Loader, Fabric API, Averion Client and compatible optimization mods.").size(15).color(SUB),
+        text("Download other Fabric mods for this version from Modrinth. Add or remove their JARs in your mods folder.").size(15).color(SUB),
+        row![
+            action(state, Control::OpenModsFolder, text("Open mods folder"), false),
+            action(state, Control::BrowseMods, text("Browse Modrinth"), false),
+        ].spacing(8).wrap(),
+    ].spacing(8);
+    if installed {
+        content = content.push(
+            action(
+                state,
+                Control::UpdateFabric,
+                text("Update Fabric and managed mods"),
+                false,
+            )
+            .on_press_maybe(
+                state
+                    .home_action_enabled()
+                    .then_some(Message::Press(Control::UpdateFabric)),
+            ),
+        );
+    }
+    if !state.mods_status.is_empty() {
+        content = content.push(text(state.mods_status.clone()).size(14).color(SUB));
+    }
+    content.into()
+}
+
 fn offline_account(state: &State) -> View {
     let ready = !state.loading_local && !state.saving_account;
     let mut input = text_input("Enter a Minecraft username", &state.account_input)
@@ -185,14 +215,14 @@ pub(super) fn version_popup(state: &State, index: usize) -> View {
 
     let family = families().nth(index).unwrap();
     let header = row![
-        bold(family.id, 24),
+        bold(family.cover, 24),
         text(family.title).size(15).color(SUB),
         Space::new().width(Fill),
         action(state, Control::CloseVersions, text("Close"), false)
     ]
     .spacing(10)
     .align_y(Alignment::Center);
-    let releases = row(patches(family.id).map(|(i, release)| {
+    let releases = row(patches(family.cover).map(|(i, release)| {
         action(
             state,
             Control::Version(i),

@@ -70,6 +70,10 @@ impl Launcher {
             self.state.focus = Control::VersionPreview;
             return Task::run(launch::start(version), Message::Launch);
         }
+        self.install_selected(version, repairing)
+    }
+
+    fn install_selected(&mut self, version: &'static str, repairing: bool) -> Task<Message> {
         let Some(events) =
             self.state
                 .installation
@@ -85,6 +89,30 @@ impl Launcher {
         }
         self.state.focus = Control::DownloadAction;
         Task::run(events, Message::Installation)
+    }
+
+    fn mods_action(&mut self, control: Control) -> Task<Message> {
+        if self.state.page != Page::Mods {
+            return Task::none();
+        }
+        let version = VERSIONS[self.state.selected].id;
+        if control == Control::UpdateFabric {
+            if !self.state.home_action_enabled() || !self.state.installed.contains(version) {
+                return Task::none();
+            }
+            self.state.navigate(Page::Home);
+            return self.install_selected(version, false);
+        }
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    game::open_mods(version, control == Control::BrowseMods)
+                })
+                .await
+                .unwrap_or_else(|_| Err("Could not open the mods location.".into()))
+            },
+            Message::ModsOpened,
+        )
     }
 
     fn download_action(&mut self) -> Task<Message> {
@@ -121,6 +149,23 @@ impl Launcher {
             Message::Press(Control::StartDownload) => return self.home_action(),
             Message::Press(Control::DownloadAction) => return self.download_action(),
             Message::Press(Control::SaveOffline) => return self.save_account(),
+            Message::Press(
+                control @ (Control::UpdateFabric | Control::OpenModsFolder | Control::BrowseMods),
+            ) => {
+                return self.mods_action(control);
+            }
+            Message::Activate
+                if matches!(
+                    self.state.focus,
+                    Control::UpdateFabric | Control::OpenModsFolder | Control::BrowseMods
+                ) =>
+            {
+                return self.mods_action(self.state.focus);
+            }
+            Message::ModsOpened(result) => {
+                self.state.mods_status = result.err().unwrap_or_default();
+                return Task::none();
+            }
             Message::Press(control) => self.state.press(control),
             Message::Focus(backwards) => {
                 self.state.cycle(backwards);
@@ -371,6 +416,29 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mods_update_uses_the_existing_installation_workflow() {
+        let mut launcher = Launcher::default();
+        let _ = launcher.update(Message::LocalReady(vec!["1.20"], Ok(None)));
+        let _ = launcher.update(Message::Press(Control::Nav(Page::Mods)));
+        assert!(launcher.state.tabs().contains(&Control::UpdateFabric));
+
+        let _ = launcher.update(Message::Press(Control::UpdateFabric));
+        assert_eq!(launcher.state.page, Page::Home);
+        assert!(launcher.state.installed.contains("1.20"));
+        assert!(matches!(
+            launcher.state.installation,
+            installation::Installation::Active {
+                request: installation::Request::Selected {
+                    version: "1.20",
+                    repair: false,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn transitions_settle_and_reduced_motion_skips_them() {

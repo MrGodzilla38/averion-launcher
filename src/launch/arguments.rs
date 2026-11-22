@@ -69,6 +69,26 @@ pub(super) fn resolve(
             args.push(expand(template, &placeholders)?);
         }
     }
+    args.extend(game.fabric_jvm.iter().cloned());
+    args.push(format!(
+        "-Dfabric.modsFolder={}",
+        path(&game.mods_directory)?
+    ));
+    let managed = game
+        .managed_mods
+        .iter()
+        .map(|jar| {
+            let jar = path(jar)?;
+            if jar.contains(SEPARATOR) {
+                return Err(Error::Invalid(
+                    "Fabric mod path contains the platform separator",
+                ));
+            }
+            Ok(jar)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join(SEPARATOR);
+    args.push(format!("-Dfabric.addMods={managed}"));
     if let Some(logging) = &game.log_config {
         placeholders.last_mut().unwrap().1 = path(&logging.file.path)?;
         args.push(expand(&logging.argument, &placeholders)?);

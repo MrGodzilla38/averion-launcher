@@ -7,6 +7,7 @@
 pub(crate) mod arguments;
 mod assets;
 mod cache;
+mod fabric;
 mod java;
 mod libraries;
 
@@ -66,6 +67,7 @@ pub(crate) enum Error {
     Invalid(&'static str),
     Native(&'static str),
     Java(&'static str),
+    Fabric(&'static str),
     Download(download::Error),
 }
 
@@ -123,9 +125,10 @@ impl fmt::Display for Error {
             ),
             Self::Https(error) => error.fmt(f),
             Self::MissingRelease => f.write_str("Mojang did not list this stable release"),
-            Self::Invalid(reason) => write!(f, "Invalid Mojang metadata ({reason})"),
+            Self::Invalid(reason) => write!(f, "Invalid game installation metadata ({reason})"),
             Self::Native(reason) => write!(f, "Could not extract natives ({reason})"),
             Self::Java(reason) => write!(f, "Could not prepare Java ({reason})"),
+            Self::Fabric(reason) => f.write_str(reason),
             Self::Download(error) => error.fmt(f),
         }
     }
@@ -348,6 +351,28 @@ impl Mojang {
         // `natives_directory` argument points at. This runs at install time so
         // launch only has to check that the recorded files are present.
         let assembled = natives::assemble(&plan.version_dir, &archives, cancel)?;
+        cancel
+            .wait(report(Progress {
+                component: format!("Minecraft {selected} Fabric stack").into(),
+                step: 0,
+                count: 0,
+                stage: Stage::Resolving,
+                overall: None,
+            }))
+            .await?;
+        let fabric = fabric::install(
+            &self.https,
+            selected,
+            plan.java_version.major,
+            &plan.version_dir,
+            plan.repair,
+            cancel,
+            report,
+        )
+        .await?;
+        directory
+            .prepare_user_mods(selected)
+            .map_err(Error::directory)?;
         let runtime =
             java::resolve(&plan.java_version, directory, &self.https, cancel, report).await?;
         let record = Record {
@@ -369,6 +394,7 @@ impl Mojang {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             log_config: plan.logging,
+            fabric: Some(fabric),
         };
         cancel.check()?;
         record::write(&plan.version_dir, selected, &plan.metadata, &record)?;
@@ -381,7 +407,7 @@ impl Mojang {
         directory: &GameDirectory,
         cancel: &Cancellation,
     ) -> Result<InstallationPlan, Error> {
-        validate_id(selected)?;
+        validate_supported_game(selected)?;
         directory.prepare().map_err(Error::directory)?;
         let cache_dir = directory.metadata_cache();
         let url = trusted_url(MANIFEST_URL, METADATA_HOSTS)?;
@@ -640,6 +666,20 @@ impl Artifact {
     }
 }
 
+fn validate_supported_game(id: &str) -> Result<(), Error> {
+    validate_id(id)?;
+    if crate::catalog::VERSIONS
+        .iter()
+        .any(|version| version.id == id)
+    {
+        Ok(())
+    } else {
+        Err(Error::Fabric(
+            "Minecraft release is outside the Fabric installation catalog",
+        ))
+    }
+}
+
 fn validate_id(id: &str) -> Result<(), Error> {
     if id.len() <= 32
         && id
@@ -749,12 +789,16 @@ pub(crate) struct Prepared {
     /// Java runtime recorded at install time, re-probed before launch.
     pub java: Runtime,
     pub game_directory: PathBuf,
+    pub mods_directory: PathBuf,
+    pub fabric_jvm: Vec<String>,
+    pub managed_mods: Vec<PathBuf>,
+    fabric: fabric::Fabric,
     pub assets_root: PathBuf,
     pub asset_index_id: String,
     pub natives_directory: PathBuf,
     /// Assembled native binaries with the size and digest the record pinned.
     pub natives: Vec<CheckedFile>,
-    /// Client JAR first, then every allowed library, in metadata order.
+    /// Fabric libraries, the game JAR, then Mojang libraries in metadata order.
     pub classpath: Vec<PathBuf>,
     pub libraries: Vec<CheckedFile>,
     pub client: CheckedFile,
@@ -765,7 +809,7 @@ pub(crate) struct Prepared {
 
 /// Rebuilds the launch inputs for an installed version from its record.
 pub(crate) fn prepare(directory: &GameDirectory, id: &str) -> Result<Prepared, Error> {
-    validate_id(id)?;
+    validate_supported_game(id)?;
     let version_dir = directory.version_path(id);
     match version_dir.symlink_metadata() {
         Ok(metadata) if metadata.is_dir() && !is_link(&metadata) => {}
@@ -780,6 +824,7 @@ pub(crate) fn prepare(directory: &GameDirectory, id: &str) -> Result<Prepared, E
         return Err(Error::Damaged("installation record version".into()));
     }
     let metadata = record::metadata(&version_dir, id, &record).map_err(as_record_damage)?;
+    let fabric = record.fabric.ok_or(Error::NotInstalled)?;
     let value = parse_version_json(&metadata, id, parse_sha1(&record.metadata_sha1)?)
         .map_err(as_record_damage)?;
     let logging = value.logging.map(logging_spec).transpose()?;
@@ -811,17 +856,23 @@ pub(crate) fn prepare(directory: &GameDirectory, id: &str) -> Result<Prepared, E
         (None, None) => None,
         _ => return Err(Error::Damaged("logging configuration record".into())),
     };
-    let classpath = std::iter::once(client_path.clone())
+    let classpath = fabric
+        .libraries(&version_dir)
+        .chain(std::iter::once(client_path.clone()))
         .chain(libraries.iter().map(|file| file.path.clone()))
         .collect();
     Ok(Prepared {
         id: id.to_owned(),
         kind: value.kind,
-        main_class: value.main_class,
+        main_class: fabric::MAIN_CLASS.to_owned(),
         arguments: value.arguments.unwrap_or_default(),
         legacy: value.minecraft_arguments,
         java: record.runtime,
         game_directory: directory.root().to_owned(),
+        mods_directory: directory.user_mods(id),
+        fabric_jvm: fabric.jvm.clone(),
+        managed_mods: fabric.mods(&version_dir),
+        fabric,
         assets_root: directory.root().join("assets"),
         asset_index_id: value.asset_index.id,
         natives_directory: version_dir.join("natives").join("launch"),
@@ -853,13 +904,10 @@ fn as_record_damage(error: Error) -> Error {
 }
 
 pub(crate) fn has_installation_record(directory: &GameDirectory, id: &str) -> bool {
-    match directory
-        .version_path(id)
-        .join(record::FILE)
-        .symlink_metadata()
-    {
-        Ok(_) => true,
-        Err(error) => error.kind() != io::ErrorKind::NotFound,
+    match record::load(&directory.version_path(id)) {
+        Ok(record) => record.is_some(),
+        // Surface damaged Fabric records through the existing Repair action.
+        Err(_) => true,
     }
 }
 
@@ -870,6 +918,10 @@ pub(crate) fn has_installation_record(directory: &GameDirectory, id: &str) -> bo
 /// a repair install.
 pub(crate) fn verify(prepared: &Prepared, cancel: &Cancellation) -> Result<(), Error> {
     verify_checked(&prepared.client, cancel)?;
+    prepared
+        .fabric
+        .verify(prepared.client.path.parent().unwrap(), cancel)?;
+    verify_managed_directories(&prepared.game_directory, Some(&prepared.mods_directory))?;
     for library in &prepared.libraries {
         cancel.check()?;
         verify_managed_directories(&prepared.game_directory, library.path.parent())?;

@@ -37,6 +37,10 @@ src/
   mojang.rs                Mojang manifest, release validation and download planning
   mojang/arguments.rs      Mojang launch argument metadata and feature/OS rules
   mojang/record.rs         Verified per-version installation records
+  mojang/fabric.rs         Fabric installation records and verified artifact pipeline
+  mojang/fabric/loader.rs  Loader resolution, profiles, and Maven artifacts
+  mojang/fabric/mods.rs    Averion Client and Modrinth release selection
+  mojang/fabric/mods/metadata.rs  Fabric JAR metadata and dependency predicates
   mojang/assets.rs         Bounded parsing and hash-based asset object plans
   mojang/cache.rs          Bounded, staged metadata cache
   mojang/java.rs           Runtime requirements, Mojang catalog and managed reuse

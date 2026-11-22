@@ -12,7 +12,7 @@ Primary goals:
 - Secure Microsoft account authentication.
 - A foundation that can support future extensions without unnecessary rewrites.
 
-The first release focuses on a reliable Vanilla Minecraft launcher.
+The first release focuses on a reliable Fabric-based Minecraft launcher.
 
 Do not implement future performance-client features unless explicitly requested.
 
@@ -32,7 +32,7 @@ Do not implement future performance-client features unless explicitly requested.
 
 - Build one pure Rust desktop application with Iced and Cargo. No Tauri, WebView, or JavaScript frontend.
 - The target operating systems are Linux and Windows.
-- The first release targets Vanilla Minecraft.
+- Every Minecraft installation and launch uses Fabric Loader.
 - Keep application logic independent from UI presentation wherever practical.
 - Keep Minecraft version resolution, downloads, runtime management, authentication and process launching logically separated.
 - Avoid premature abstractions and unnecessary crates.

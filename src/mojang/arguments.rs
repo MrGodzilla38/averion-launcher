@@ -7,7 +7,7 @@
 //! of ignoring them.
 
 use super::{Error, Platform};
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 use std::collections::BTreeMap;
 
 const MAX_SECTIONS: usize = 1024;
@@ -130,6 +130,10 @@ pub(crate) struct Arguments {
     pub jvm: Option<Vec<Argument>>,
     #[serde(default)]
     pub game: Option<Vec<Argument>>,
+    // Mojang's user-profile defaults include optional heap and GC settings.
+    // Only the game and required JVM arguments drive an Averion launch.
+    #[serde(rename = "default-user-jvm")]
+    _default_user_jvm: Option<IgnoredAny>,
 }
 
 /// One JVM or game argument entry: a plain template, or templates guarded by

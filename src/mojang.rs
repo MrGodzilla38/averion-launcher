@@ -65,6 +65,7 @@ pub(crate) enum Error {
     /// A file the installation depends on is missing, unreadable or corrupt.
     Damaged(String),
     Invalid(&'static str),
+    VersionJson(String),
     Native(&'static str),
     Java(&'static str),
     Fabric(&'static str),
@@ -126,6 +127,12 @@ impl fmt::Display for Error {
             Self::Https(error) => error.fmt(f),
             Self::MissingRelease => f.write_str("Mojang did not list this stable release"),
             Self::Invalid(reason) => write!(f, "Invalid game installation metadata ({reason})"),
+            Self::VersionJson(reason) => {
+                write!(
+                    f,
+                    "Invalid game installation metadata (version JSON: {reason})"
+                )
+            }
             Self::Native(reason) => write!(f, "Could not extract natives ({reason})"),
             Self::Java(reason) => write!(f, "Could not prepare Java ({reason})"),
             Self::Fabric(reason) => f.write_str(reason),
@@ -533,7 +540,7 @@ fn parse_version_json(bytes: &[u8], selected: &str, sha1: [u8; 20]) -> Result<Ve
         return Err(Error::Invalid("version metadata checksum"));
     }
     let value: VersionJson =
-        serde_json::from_slice(bytes).map_err(|_| Error::Invalid("version JSON"))?;
+        serde_json::from_slice(bytes).map_err(|error| Error::VersionJson(error.to_string()))?;
     if value.id != selected || value.kind != "release" {
         return Err(Error::Invalid("version ID or release type"));
     }
@@ -899,6 +906,7 @@ pub(crate) fn prepare(directory: &GameDirectory, id: &str) -> Result<Prepared, E
 fn as_record_damage(error: Error) -> Error {
     match error {
         Error::Invalid(reason) => Error::Damaged(reason.into()),
+        Error::VersionJson(reason) => Error::Damaged(format!("version JSON: {reason}")),
         error => error,
     }
 }

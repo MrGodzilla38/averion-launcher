@@ -131,6 +131,90 @@ fn verifies_metadata_digest_and_validates_required_artifact_fields() {
 }
 
 #[test]
+fn parses_official_versions_and_resolves_client_libraries() {
+    let base = tempfile::tempdir().unwrap();
+    let (_sender, cancel) = download::cancellation();
+    let https = Https::default();
+    for (id, major, component, sha1, bytes) in [
+        (
+            "1.20.1",
+            17,
+            "java-runtime-gamma",
+            "fb730d2829f057fe26a41e5ecdc9e3307333bef5",
+            include_bytes!("fixtures/1.20.1.json").as_slice(),
+        ),
+        (
+            "1.21.11",
+            21,
+            "java-runtime-delta",
+            "a969d96978af7b52dba8df44e177f48ec4ebe0d8",
+            include_bytes!("fixtures/1.21.11.json").as_slice(),
+        ),
+        (
+            "26.1",
+            25,
+            "java-runtime-epsilon",
+            "224ef4d5ccb0a181b750765f2fdc591e0072bd3a",
+            include_bytes!("fixtures/26.1.json").as_slice(),
+        ),
+        (
+            "26.2",
+            25,
+            "java-runtime-epsilon",
+            "cf103b8fab4900562221bf7f23b72725dd9a914a",
+            include_bytes!("fixtures/26.2.json").as_slice(),
+        ),
+        (
+            "26.3",
+            25,
+            "java-runtime-epsilon",
+            "ead839cbccf0ddf013c3f935f2840080b5cb0d26",
+            include_bytes!("fixtures/26.3.json").as_slice(),
+        ),
+    ] {
+        let hash = parse_sha1(sha1).unwrap();
+        for os in ["linux", "windows"] {
+            let platform = Platform { os };
+            let version = Version::parse(bytes, id, hash)
+                .unwrap_or_else(|error| panic!("Minecraft {id}: {error}"));
+            assert_eq!(version.java_version.major, major);
+            assert_eq!(version.java_version.component, component);
+            let resolved =
+                libraries::resolve(version.libraries, platform, base.path(), &https, &cancel)
+                    .unwrap_or_else(|error| panic!("Minecraft {id} on {os}: {error}"));
+            assert!(!resolved.downloads.is_empty());
+
+            let metadata = parse_version_json(bytes, id, hash).unwrap();
+            assert!(metadata.arguments.unwrap().has_game());
+            let classpath = libraries::classpath(metadata.libraries, platform, base.path())
+                .unwrap_or_else(|error| panic!("Minecraft {id} on {os}: {error}"));
+            assert!(!classpath.is_empty());
+        }
+    }
+}
+
+#[test]
+fn reports_missing_required_version_json_fields_in_install_and_repair_errors() {
+    let mut document = version_json();
+    document["downloads"]
+        .as_object_mut()
+        .unwrap()
+        .remove("client");
+    let bytes = document.to_string();
+    let error = parse_version_json(bytes.as_bytes(), SELECTED, digest(bytes.as_bytes()))
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("missing field `client` at line"));
+    let damaged = as_record_damage(error);
+    assert!(damaged.repairable());
+    assert!(
+        damaged
+            .to_string()
+            .contains("missing field `client` at line")
+    );
+}
+
+#[test]
 fn cache_reads_fresh_entries_and_refreshes_stale_or_invalid_entries_safely() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();

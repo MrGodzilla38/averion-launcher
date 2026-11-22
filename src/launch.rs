@@ -1,10 +1,13 @@
 mod arguments;
 
+#[cfg(test)]
+pub(crate) use arguments::resolve as resolve_test_arguments;
+
 use crate::{account, download, game_directory::GameDirectory, mojang};
 use futures::SinkExt;
 use std::{io, path::Path, process::ExitStatus};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     process::{Child, Command},
 };
 
@@ -12,7 +15,10 @@ const MAX_STREAM_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum Event {
-    Started { log: String },
+    Started {
+        log: String,
+        profile: Option<account::Account>,
+    },
     Finished(Result<Exit, Error>),
 }
 
@@ -53,23 +59,22 @@ async fn run(
     let (_sender, cancel) = download::cancellation();
     let validation = cancel.clone();
     let version = version.to_owned();
-    let (directory, _lock, game, session) = tokio::task::spawn_blocking(move || {
+    let (directory, _lock, game, account) = tokio::task::spawn_blocking(move || {
         let directory = GameDirectory::discover().map_err(io_error)?;
         let lock = directory.lock_operation().map_err(io_error)?;
         let account = account::load(&directory)
             .map_err(|error| {
-                Error::Account(format!(
-                    "Could not load the offline account ({})",
-                    error.kind()
-                ))
+                Error::Account(format!("Could not load saved accounts ({}).", error.kind()))
             })?
+            .active()
+            .cloned()
             .ok_or_else(|| {
-                Error::Account("Save an offline username in Accounts before playing.".into())
+                Error::Account("Select an account in Accounts before playing.".into())
             })?;
         directory.prepare().map_err(io_error)?;
         let game = mojang::prepare(&directory, &version)?;
         mojang::verify(&game, &validation)?;
-        Ok::<_, Error>((directory, lock, game, account.session()))
+        Ok::<_, Error>((directory, lock, game, account))
     })
     .await
     .map_err(|_| Error::Io("Installation validation did not finish.".into()))??;
@@ -87,17 +92,35 @@ async fn run(
                 "compatible Java is missing or no longer works",
             ))?,
     };
+    let session = account::microsoft::launch_session(&directory, account)
+        .await
+        .map_err(|error| Error::Account(error.to_string()))?;
+    let authenticated = session.user_type == "msa";
     let output = tempfile::Builder::new()
         .prefix("minecraft-")
         .tempdir_in(directory.logs())
         .map_err(io_error)?;
     let mut command = Command::new(runtime.executable);
+    let crash_log = output.path().join("hs_err_pid%p.log");
+    // A HotSpot fatal error report can include the original Java command line.
+    let error_file = if authenticated {
+        Path::new(if cfg!(windows) { "NUL" } else { "/dev/null" })
+    } else {
+        &crash_log
+    };
+    if authenticated {
+        command.arg(if major == 8 {
+            "-XX:-CreateMinidumpOnCrash"
+        } else {
+            "-XX:-CreateCoredumpOnCrash"
+        });
+    }
     command
         .args(arguments::resolve(
             &game,
             &session,
             mojang::Platform::current()?,
-            &output.path().join("hs_err_pid%p.log"),
+            error_file,
         )?)
         .current_dir(&game.game_directory);
     mojang::configure_java(&mut command);
@@ -107,9 +130,24 @@ async fn run(
         .map_err(|error| Error::Io(format!("Could not start Minecraft ({})", error.kind())))?;
     let log_path = output.keep();
     let log = format!("logs/{}", log_path.file_name().unwrap().to_string_lossy());
-    let _ = events.send(Event::Started { log: log.clone() }).await;
-
-    monitor(&mut child, log, stdout, stderr).await
+    let profile = authenticated
+        .then(|| account::Account::microsoft(session.player_name.clone(), &session.uuid))
+        .flatten();
+    drop(command);
+    let _ = events
+        .send(Event::Started {
+            log: log.clone(),
+            profile,
+        })
+        .await;
+    monitor(
+        &mut child,
+        log,
+        stdout,
+        stderr,
+        authenticated.then_some(session.access_token.as_bytes()),
+    )
+    .await
 }
 
 async fn monitor(
@@ -117,13 +155,14 @@ async fn monitor(
     log: String,
     stdout: tokio::fs::File,
     stderr: tokio::fs::File,
+    secret: Option<&[u8]>,
 ) -> Result<Exit, Error> {
     let out_pipe = child.stdout.take().expect("stdout is piped");
     let err_pipe = child.stderr.take().expect("stderr is piped");
     let (status, out, err) = futures::join!(
         child.wait(),
-        capture(out_pipe, stdout),
-        capture(err_pipe, stderr)
+        capture(out_pipe, stdout, secret),
+        capture(err_pipe, stderr, secret)
     );
     Ok(Exit {
         status: status.map_err(io_error)?,
@@ -139,9 +178,16 @@ async fn open_logs(path: &Path) -> io::Result<(tokio::fs::File, tokio::fs::File)
     )
 }
 
-async fn capture(pipe: impl AsyncRead + Unpin, mut output: tokio::fs::File) -> io::Result<()> {
+async fn capture(
+    pipe: impl AsyncRead + Unpin,
+    mut output: tokio::fs::File,
+    secret: Option<&[u8]>,
+) -> io::Result<()> {
     let mut limited = pipe.take(MAX_STREAM_BYTES);
-    let written = tokio::io::copy(&mut limited, &mut output).await;
+    let written = match secret {
+        Some(secret) => redact(&mut limited, &mut output, secret).await,
+        None => tokio::io::copy(&mut limited, &mut output).await.map(|_| ()),
+    };
     // Keep draining even after reaching the limit or a disk write fails.
     let discarded = tokio::io::copy(&mut limited.into_inner(), &mut tokio::io::sink()).await?;
     written?;
@@ -151,6 +197,44 @@ async fn capture(pipe: impl AsyncRead + Unpin, mut output: tokio::fs::File) -> i
             .await?;
     }
     output.flush().await
+}
+
+async fn redact(
+    mut input: impl AsyncRead + Unpin,
+    mut output: impl AsyncWrite + Unpin,
+    secret: &[u8],
+) -> io::Result<()> {
+    use zeroize::Zeroizing;
+
+    let mut buffer = Zeroizing::new(vec![0; 8192 + secret.len()]);
+    let mut retained = 0;
+    loop {
+        let read = input.read(&mut buffer[retained..]).await?;
+        let end = retained + read;
+        let mut start = 0;
+        while let Some(offset) = buffer[start..end]
+            .windows(secret.len())
+            .position(|part| part == secret)
+        {
+            let offset = start + offset;
+            output.write_all(&buffer[start..offset]).await?;
+            output.write_all(b"[redacted]").await?;
+            start = offset + secret.len();
+        }
+        // A partial token may straddle reads, including the stream capture limit.
+        retained = (0..=end.saturating_sub(start).min(secret.len() - 1))
+            .rev()
+            .find(|&len| buffer[end - len..end] == secret[..len])
+            .unwrap_or(0);
+        output.write_all(&buffer[start..end - retained]).await?;
+        if read == 0 {
+            if retained > 0 {
+                output.write_all(b"[redacted]").await?;
+            }
+            return Ok(());
+        }
+        buffer.copy_within(end - retained..end, 0);
+    }
 }
 
 fn io_error(error: io::Error) -> Error {
@@ -170,6 +254,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn redacts_access_tokens_across_process_output_reads() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let secret = b"mock-minecraft-access-token";
+                let mut source = vec![b'x'; 8190];
+                source.extend_from_slice(secret);
+                source.extend_from_slice(b" and mock-mine");
+                let mut output = Vec::new();
+                redact(source.as_slice(), &mut output, secret)
+                    .await
+                    .unwrap();
+                assert_eq!(&output[..8190], &source[..8190]);
+                assert_eq!(&output[8190..], b"[redacted] and [redacted]");
+            });
+    }
+
+    #[test]
     fn captures_both_pipes_and_reports_a_nonzero_exit() {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -187,7 +291,7 @@ mod tests {
                 assert_eq!(command.as_std().get_args().len(), argument_count);
                 let (stdout, stderr) = open_logs(directory.path()).await.unwrap();
                 let mut child = command.spawn().unwrap();
-                let exit = monitor(&mut child, "logs/fixture".into(), stdout, stderr)
+                let exit = monitor(&mut child, "logs/fixture".into(), stdout, stderr, None)
                     .await
                     .unwrap();
                 assert_eq!(exit.status.code(), Some(17));

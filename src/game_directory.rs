@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone)]
 pub(crate) struct GameDirectory {
     root: PathBuf,
 }
@@ -59,8 +60,7 @@ impl GameDirectory {
         self.root.join("cache/mojang")
     }
 
-    /// Persisted account configuration. Never holds tokens, only the offline
-    /// username; Microsoft secrets must use operating-system credential storage.
+    /// Public account identities and the active selection.
     pub(crate) fn account_file(&self) -> PathBuf {
         self.root.join("config/account.json")
     }
@@ -81,8 +81,22 @@ impl GameDirectory {
 
     /// Serializes installs and launches for this game root across launcher processes.
     pub(crate) fn lock_operation(&self) -> io::Result<File> {
+        self.lock(
+            "config/game.lock",
+            "Minecraft is already running or another launcher is busy",
+        )
+    }
+
+    pub(crate) fn lock_accounts(&self) -> io::Result<File> {
+        self.lock(
+            "config/accounts.lock",
+            "Another launcher is updating accounts",
+        )
+    }
+
+    fn lock(&self, name: &str, busy: &'static str) -> io::Result<File> {
         self.prepare_config()?;
-        let path = self.root.join("config/game.lock");
+        let path = self.root.join(name);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if !metadata.is_file() || is_link(&metadata) => {
                 return Err(ErrorKind::InvalidInput.into());
@@ -98,10 +112,7 @@ impl GameDirectory {
             .write(true)
             .open(path)?;
         lock.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => io::Error::new(
-                ErrorKind::WouldBlock,
-                "Minecraft is already running or another launcher is busy",
-            ),
+            TryLockError::WouldBlock => io::Error::new(ErrorKind::WouldBlock, busy),
             TryLockError::Error(error) => error,
         })?;
         Ok(lock)

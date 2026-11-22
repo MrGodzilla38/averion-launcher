@@ -9,7 +9,7 @@ use std::path::Path;
 
 const SEPARATOR: &str = if cfg!(windows) { ";" } else { ":" };
 
-pub(super) fn resolve(
+pub(crate) fn resolve(
     game: &Prepared,
     session: &Session,
     platform: Platform,
@@ -35,7 +35,7 @@ pub(super) fn resolve(
         ("auth_uuid", session.uuid.as_str()),
         ("auth_access_token", session.access_token.as_str()),
         ("auth_session", session.access_token.as_str()),
-        ("user_type", session.user_type.as_str()),
+        ("user_type", session.user_type),
         ("clientid", session.client_id.as_str()),
         ("auth_xuid", session.xuid.as_str()),
         ("user_properties", "{}"),

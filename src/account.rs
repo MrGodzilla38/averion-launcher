@@ -1,17 +1,15 @@
-//! Account sessions consumed by the launch engine.
-//!
-//! Offline accounts are fully implemented: Mojang-style name validation,
-//! deterministic offline UUIDs and the argument values the client expects for
-//! offline play. Microsoft authentication is intentionally **not** implemented
-//! in this phase. [`Auth`] is the seam where a future OS-vault-backed
-//! Microsoft token provider attaches; the launch engine already consumes
-//! [`Account::session`] regardless of how the account was produced.
+//! Public account identities, their active selection, and Minecraft launch sessions.
+
+pub(crate) mod microsoft;
+mod vault;
 
 use crate::game_directory::GameDirectory;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt, fs,
     io::{self, Read, Write},
 };
+use zeroize::Zeroizing;
 
 /// Placeholder access token for offline play.
 ///
@@ -24,24 +22,27 @@ const OFFLINE_TOKEN: &str = "0";
 const MIN_NAME: usize = 3;
 const MAX_NAME: usize = 16;
 
-/// How the session was authenticated. A future `Microsoft` variant carries a
-/// real token held in operating-system credential storage; it is deliberately
-/// absent until that flow exists, so no placeholder token can be mistaken for
-/// a working Microsoft session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Auth {
     Offline,
+    Microsoft,
 }
 
-/// A player identity the launch engine can use.
-///
-/// Offline accounts contain no secrets, so deriving `Debug` is safe. A future
-/// Microsoft variant must hold its token in a redacting wrapper instead,
-/// because `Message` and its payloads are formatted during diagnostics.
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl Auth {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Offline => "Offline",
+            Self::Microsoft => "Microsoft",
+        }
+    }
+}
+
+/// An account's public display identity. Secrets live in the vault or a launch session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Account {
     name: String,
-    /// Canonical lowercase hyphenated UUID.
     uuid: String,
     auth: Auth,
 }
@@ -64,23 +65,17 @@ impl fmt::Display for NameError {
 
 impl std::error::Error for NameError {}
 
-/// The account values substituted into Minecraft's launch arguments.
-///
-/// Every field is safe to derive into argument values. Offline sessions never
-/// contain credentials: `access_token` is the public placeholder described in
-/// [`Auth`], and `client_id`/`xuid` are empty because no Microsoft identity is
-/// involved.
+/// The values passed to Minecraft. A session deliberately has no debug representation.
 pub struct Session {
     pub player_name: String,
     pub uuid: String,
-    pub access_token: String,
-    pub user_type: String,
+    pub access_token: Zeroizing<String>,
+    pub user_type: &'static str,
     pub client_id: String,
     pub xuid: String,
 }
 
 impl Account {
-    /// Builds a validated offline account with a deterministic offline UUID.
     pub fn offline(name: &str) -> Result<Self, NameError> {
         validate_name(name)?;
         Ok(Self {
@@ -90,26 +85,66 @@ impl Account {
         })
     }
 
+    pub(crate) fn microsoft(name: String, uuid: &str) -> Option<Self> {
+        validate_name(&name).ok()?;
+        Some(Self {
+            name,
+            uuid: canonical_uuid(uuid)?,
+            auth: Auth::Microsoft,
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Produces the argument values for a launch. The Microsoft flow will
-    /// supply a real token here without changing the launch engine.
-    pub fn session(&self) -> Session {
-        match self.auth {
-            Auth::Offline => Session {
-                player_name: self.name.clone(),
-                uuid: self.uuid.clone(),
-                access_token: OFFLINE_TOKEN.to_owned(),
-                // The client accepts "legacy" for sessions without a Microsoft
-                // account; offline play is never "msa".
-                user_type: "legacy".to_owned(),
-                client_id: String::new(),
-                xuid: String::new(),
-            },
-        }
+    pub fn auth(&self) -> Auth {
+        self.auth
     }
+
+    fn same_identity(&self, other: &Self) -> bool {
+        self.auth == other.auth && self.uuid == other.uuid
+    }
+
+    fn offline_session(&self) -> Option<Session> {
+        (self.auth == Auth::Offline).then(|| Session {
+            player_name: self.name.clone(),
+            uuid: self.uuid.clone(),
+            access_token: Zeroizing::new(OFFLINE_TOKEN.to_owned()),
+            user_type: "legacy",
+            client_id: String::new(),
+            xuid: String::new(),
+        })
+    }
+}
+
+fn canonical_uuid(value: &str) -> Option<String> {
+    let value = match value.len() {
+        32 => value.to_owned(),
+        36 if value.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        }) =>
+        {
+            value.replace('-', "")
+        }
+        _ => return None,
+    };
+    if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = value.to_ascii_lowercase();
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &value[..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..]
+    ))
 }
 
 /// Validates an offline username against Mojang's historical rules.
@@ -158,64 +193,119 @@ fn offline_uuid(name: &str) -> String {
     )
 }
 
-/// Reads the persisted account, if one has been configured. Malformed or
-/// unsupported files are reported instead of silently ignored.
-pub fn load(directory: &GameDirectory) -> io::Result<Option<Account>> {
-    let path = directory.account_file();
-    let bytes = match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() && !crate::game_directory::is_link(&metadata) => {
-            let mut bytes = Vec::new();
-            fs::File::open(&path)?.take(4097).read_to_end(&mut bytes)?;
-            bytes
-        }
-        Ok(_) => return Err(io::ErrorKind::InvalidInput.into()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    if bytes.len() > 4096 {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    let account: Stored = serde_json::from_slice(&bytes).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "account file is not valid JSON")
-    })?;
-    if account.kind != "offline" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unsupported account kind",
-        ));
-    }
-    let name = account.username;
-    let account = Account::offline(&name).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("stored offline username is invalid ({error})"),
-        )
-    })?;
-    Ok(Some(account))
+const ACCOUNT_LIMIT: usize = 64;
+const FILE_LIMIT: usize = 32 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Accounts {
+    pub entries: Vec<Account>,
+    active: Option<usize>,
 }
 
-/// Validates and atomically stores the offline account. No token or secret is
-/// written; only the username is persisted.
-pub fn save(directory: &GameDirectory, username: &str) -> io::Result<Account> {
-    let account = Account::offline(username).map_err(|error| {
+impl Accounts {
+    pub fn active(&self) -> Option<&Account> {
+        self.active.and_then(|index| self.entries.get(index))
+    }
+
+    pub fn is_active(&self, index: usize) -> bool {
+        self.active == Some(index)
+    }
+
+    pub(crate) fn update_profile(&mut self, profile: Account) {
+        if let Some(index) = self.index_of(&profile) {
+            self.entries[index] = profile;
+        }
+    }
+
+    fn index_of(&self, account: &Account) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.same_identity(account))
+    }
+
+    fn insert(&mut self, account: Account) -> io::Result<()> {
+        if let Some(index) = self.index_of(&account) {
+            self.entries[index] = account;
+            self.active = Some(index);
+        } else {
+            if self.entries.len() >= ACCOUNT_LIMIT {
+                return Err(io::Error::other("The saved account limit was reached"));
+            }
+            self.active = Some(self.entries.len());
+            self.entries.push(account);
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> bool {
+        self.entries.len() <= ACCOUNT_LIMIT
+            && self.active.is_none_or(|index| index < self.entries.len())
+            && self.entries.iter().enumerate().all(|(index, account)| {
+                let valid = match account.auth {
+                    Auth::Offline => {
+                        Account::offline(&account.name).is_ok_and(|expected| expected == *account)
+                    }
+                    Auth::Microsoft => Account::microsoft(account.name.clone(), &account.uuid)
+                        .is_some_and(|expected| expected == *account),
+                };
+                valid && self.index_of(account) == Some(index)
+            })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Stored {
+    Current(Accounts),
+    Legacy(Legacy),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Legacy {
+    kind: String,
+    username: String,
+}
+
+pub fn load(directory: &GameDirectory) -> io::Result<Accounts> {
+    let path = directory.account_file();
+    let mut bytes = Vec::new();
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !crate::game_directory::is_link(&metadata) => {
+            fs::File::open(&path)?
+                .take(FILE_LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)?;
+        }
+        Ok(_) => return Err(io::ErrorKind::InvalidInput.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Accounts::default()),
+        Err(error) => return Err(error),
+    }
+    let invalid = || {
         io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid username ({error})"),
+            io::ErrorKind::InvalidData,
+            "The saved accounts file is invalid",
         )
-    })?;
+    };
+    if bytes.len() > FILE_LIMIT {
+        return Err(invalid());
+    }
+    match serde_json::from_slice(&bytes).map_err(|_| invalid())? {
+        Stored::Current(accounts) if accounts.validate() => Ok(accounts),
+        Stored::Legacy(legacy) if legacy.kind == "offline" => {
+            let mut accounts = Accounts::default();
+            accounts.insert(Account::offline(&legacy.username).map_err(|_| invalid())?)?;
+            Ok(accounts)
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn write(directory: &GameDirectory, accounts: &Accounts) -> io::Result<()> {
     directory.prepare_config()?;
     let path = directory.account_file();
-    if let Ok(metadata) = fs::symlink_metadata(&path)
-        && (crate::game_directory::is_link(&metadata) || !metadata.is_file())
-    {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    let document = serde_json::to_vec(&Stored {
-        kind: "offline".into(),
-        username: account.name().into(),
-    })
-    .map_err(|_| io::ErrorKind::InvalidData)?;
-    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let document = serde_json::to_vec(accounts).map_err(|_| io::ErrorKind::InvalidData)?;
+    let parent = path.parent().ok_or(ErrorKind::InvalidInput)?;
     let mut stage = tempfile::Builder::new()
         .prefix(".averion-")
         .suffix(".part")
@@ -224,14 +314,48 @@ pub fn save(directory: &GameDirectory, username: &str) -> io::Result<Account> {
     stage.write_all(b"\n")?;
     stage.as_file().sync_all()?;
     stage.persist(&path).map_err(|error| error.error)?;
-    Ok(account)
+    Ok(())
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Stored {
-    kind: String,
-    username: String,
+pub fn save_offline(directory: &GameDirectory, username: &str) -> io::Result<Accounts> {
+    let account = Account::offline(username)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
+    let _lock = directory.lock_accounts()?;
+    let mut accounts = load(directory)?;
+    accounts.insert(account)?;
+    write(directory, &accounts)?;
+    Ok(accounts)
 }
+
+pub fn select(directory: &GameDirectory, account: &Account) -> io::Result<Accounts> {
+    let _lock = directory.lock_accounts()?;
+    let mut accounts = load(directory)?;
+    accounts.active = Some(accounts.index_of(account).ok_or(ErrorKind::NotFound)?);
+    write(directory, &accounts)?;
+    Ok(accounts)
+}
+
+pub fn remove(directory: &GameDirectory, account: &Account) -> Result<Accounts, microsoft::Error> {
+    let _lock = directory.lock_accounts()?;
+    let mut accounts = load(directory)?;
+    let index = accounts
+        .index_of(account)
+        .ok_or_else(|| io::Error::from(ErrorKind::NotFound))?;
+    if account.auth == Auth::Microsoft {
+        vault::Native.remove(&account.uuid)?;
+    }
+    accounts.entries.remove(index);
+    accounts.active = accounts.active.and_then(|active| match active.cmp(&index) {
+        std::cmp::Ordering::Less => Some(active),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(active - 1),
+    });
+    write(directory, &accounts)?;
+    Ok(accounts)
+}
+
+use std::io::ErrorKind;
+use vault::Vault;
 
 #[cfg(test)]
 mod tests {
@@ -272,10 +396,13 @@ mod tests {
 
     #[test]
     fn offline_session_carries_no_microsoft_credentials() {
-        let session = Account::offline("Notch").unwrap().session();
+        let session = Account::offline("Notch")
+            .unwrap()
+            .offline_session()
+            .unwrap();
         assert_eq!(session.player_name, "Notch");
         assert_eq!(session.uuid, "b50ad385-829d-3141-a216-7e7d7539ba7f");
-        assert_eq!(session.access_token, "0");
+        assert_eq!(session.access_token.as_str(), "0");
         assert_eq!(session.user_type, "legacy");
         assert!(session.client_id.is_empty());
         assert!(session.xuid.is_empty());
@@ -286,10 +413,18 @@ mod tests {
     fn account_file_round_trips_and_rejects_unsupported_documents() {
         let base = tempfile::tempdir().unwrap();
         let directory = GameDirectory::for_test(base.path());
-        assert!(load(&directory).unwrap().is_none());
+        assert!(load(&directory).unwrap().active().is_none());
+        directory.prepare_config().unwrap();
+        fs::write(
+            directory.account_file(),
+            br#"{"kind":"offline","username":"Notch"}"#,
+        )
+        .unwrap();
+        assert_eq!(load(&directory).unwrap().active().unwrap().name(), "Notch");
 
-        let saved = save(&directory, "Steve_123").unwrap();
-        assert_eq!(load(&directory).unwrap().as_ref(), Some(&saved));
+        let saved = save_offline(&directory, "Steve_123").unwrap();
+        assert_eq!(load(&directory).unwrap(), saved);
+        assert_eq!(saved.entries.len(), 2);
         let document = fs::read(directory.account_file()).unwrap();
         let text = String::from_utf8(document).unwrap();
         assert!(text.contains("\"offline\""));
@@ -307,7 +442,7 @@ mod tests {
             io::ErrorKind::InvalidData
         );
         assert_eq!(
-            save(&directory, "no spaces").unwrap_err().kind(),
+            save_offline(&directory, "no spaces").unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
     }

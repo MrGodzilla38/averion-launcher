@@ -29,7 +29,7 @@ impl Launch {
             return;
         };
         match event {
-            launch::Event::Started { log } => {
+            launch::Event::Started { log, .. } => {
                 self.running = true;
                 self.status = format!("Minecraft {version} is running. Output in {log}.");
             }
@@ -67,7 +67,7 @@ impl Launch {
     }
 }
 
-pub(super) fn read_local() -> (Vec<&'static str>, Result<Option<String>, String>) {
+pub(super) fn read_local() -> (Vec<&'static str>, Result<account::Accounts, String>) {
     let Ok(directory) = GameDirectory::discover() else {
         return (
             Vec::new(),
@@ -80,16 +80,8 @@ pub(super) fn read_local() -> (Vec<&'static str>, Result<Option<String>, String>
         .map(|version| version.id)
         .collect();
     let account = account::load(&directory)
-        .map(|account| account.map(|account| account.name().to_owned()))
-        .map_err(|error| format!("Could not read the offline account ({}).", error.kind()));
+        .map_err(|error| format!("Could not read saved accounts ({}).", error.kind()));
     (versions, account)
-}
-
-pub(super) fn save_account(name: &str) -> Result<String, String> {
-    let directory = GameDirectory::discover().map_err(|error| error.to_string())?;
-    account::save(&directory, name)
-        .map(|account| account.name().to_owned())
-        .map_err(|error| format!("Could not save the offline account ({error})."))
 }
 
 pub(super) fn open_mods(version: &str, browse: bool) -> Result<(), String> {

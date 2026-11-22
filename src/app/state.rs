@@ -6,6 +6,8 @@ use crate::{
     message::{Control, Page},
 };
 
+pub(crate) const MICROSOFT_SIGN_IN_ENABLED: bool = false;
+
 pub struct State {
     pub page: Page,
     pub selected: usize,
@@ -19,11 +21,13 @@ pub struct State {
     pub loading_local: bool,
     pub closing_after_game: bool,
     pub launch: super::game::Launch,
-    pub account_name: Option<String>,
+    pub accounts: crate::account::Accounts,
     pub account_input: String,
     pub account_status: String,
     pub mods_status: String,
-    pub saving_account: bool,
+    pub account_busy: bool,
+    pub sign_in_cancellable: bool,
+    pub microsoft_client_id: Result<String, crate::account::microsoft::Error>,
     details_visible: bool,
 }
 
@@ -45,11 +49,13 @@ impl Default for State {
             loading_local: false,
             closing_after_game: false,
             launch: super::game::Launch::default(),
-            account_name: None,
+            accounts: crate::account::Accounts::default(),
             account_input: String::new(),
             account_status: String::new(),
             mods_status: String::new(),
-            saving_account: false,
+            account_busy: false,
+            sign_in_cancellable: false,
+            microsoft_client_id: crate::account::microsoft::client_id(),
             details_visible: false,
         }
     }
@@ -64,7 +70,10 @@ impl State {
     }
 
     pub fn home_action_enabled(&self) -> bool {
-        !self.loading_local && !self.installation.is_active() && !self.launch.active()
+        !self.loading_local
+            && !self.installation.is_active()
+            && !self.launch.active()
+            && !self.account_busy
     }
 
     pub fn tabs(&self) -> Vec<Control> {
@@ -104,8 +113,22 @@ impl State {
                 }
             }
             Page::Settings => order.push(Control::Motion),
-            Page::Accounts if !self.loading_local && !self.saving_account => {
-                order.extend([Control::OfflineName, Control::SaveOffline]);
+            Page::Accounts if self.sign_in_cancellable => {
+                order.push(Control::CancelMicrosoftSignIn)
+            }
+            Page::Accounts => {
+                if MICROSOFT_SIGN_IN_ENABLED {
+                    order.push(Control::MicrosoftSignIn);
+                }
+                if self.home_action_enabled() {
+                    for index in 0..self.accounts.entries.len() {
+                        if !self.accounts.is_active(index) {
+                            order.push(Control::SelectAccount(index));
+                        }
+                        order.push(Control::RemoveAccount(index));
+                    }
+                    order.extend([Control::OfflineName, Control::SaveOffline]);
+                }
             }
             _ => {}
         }
@@ -203,6 +226,10 @@ impl State {
             | Control::DownloadAction
             | Control::OfflineName
             | Control::SaveOffline
+            | Control::MicrosoftSignIn
+            | Control::CancelMicrosoftSignIn
+            | Control::SelectAccount(_)
+            | Control::RemoveAccount(_)
             | Control::UpdateFabric
             | Control::OpenModsFolder
             | Control::BrowseMods => {}

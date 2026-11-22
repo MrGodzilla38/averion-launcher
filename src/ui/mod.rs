@@ -74,11 +74,12 @@ fn navigation(state: &State, arrival: f32) -> View {
             art::icon(8, 24),
             column![
                 bold("Profile", 14),
-                text(if state.account_name.is_some() {
-                    "Offline"
-                } else {
-                    "Signed out"
-                })
+                text(
+                    state
+                        .accounts
+                        .active()
+                        .map_or("Signed out", |account| account.auth().label())
+                )
                 .size(12)
                 .color(SUB)
             ]

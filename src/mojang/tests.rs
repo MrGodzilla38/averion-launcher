@@ -510,6 +510,8 @@ fn prepares_legacy_game_and_detects_same_size_classpath_damage() {
     fs::write(object, b"abc").unwrap();
 
     let mut metadata = version_json();
+    let legacy = "--username ${auth_player_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type}";
+    metadata["minecraftArguments"] = json!(legacy);
     metadata["assetIndex"]["size"] = json!(assets.len());
     metadata["assetIndex"]["sha1"] = json!(hex_sha1(&digest(assets.as_bytes())));
     let metadata = serde_json::to_vec(&metadata).unwrap();
@@ -528,11 +530,34 @@ fn prepares_legacy_game_and_detects_same_size_classpath_damage() {
     record::write(&version_dir, SELECTED, &metadata, &record).unwrap();
     let prepared = prepare(&directory, SELECTED).unwrap();
     assert!(prepared.arguments.game.is_none());
-    assert_eq!(
-        prepared.legacy.as_deref(),
-        Some("--username ${auth_player_name}")
-    );
+    assert_eq!(prepared.legacy.as_deref(), Some(legacy));
     assert_eq!(prepared.main_class, fabric::MAIN_CLASS);
+    let session = crate::account::Session {
+        player_name: "AuthenticatedPlayer".into(),
+        uuid: "12345678-1234-4abc-abcd-123456789abc".into(),
+        access_token: zeroize::Zeroizing::new("synthetic-access-token".into()),
+        user_type: "msa",
+        client_id: String::new(),
+        xuid: String::new(),
+    };
+    let arguments = crate::launch::resolve_test_arguments(
+        &prepared,
+        &session,
+        Platform::current().unwrap(),
+        &base.path().join("java-error.log"),
+    )
+    .unwrap();
+    assert!(arguments.ends_with(&[
+        fabric::MAIN_CLASS.into(),
+        "--username".into(),
+        session.player_name,
+        "--uuid".into(),
+        session.uuid,
+        "--accessToken".into(),
+        "synthetic-access-token".into(),
+        "--userType".into(),
+        "msa".into(),
+    ]));
     assert_eq!(&prepared.classpath[1..], [client, library.clone()]);
     for (path, contents) in std::iter::once(&prepared.classpath[0])
         .chain(&prepared.managed_mods)

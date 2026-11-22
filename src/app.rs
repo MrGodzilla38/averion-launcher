@@ -35,12 +35,19 @@ pub struct Launcher {
     mojang: Mojang,
     close_after_activity: Option<window::Id>,
     read_local_started: bool,
+    sign_in_cancel: Option<futures::channel::oneshot::Sender<()>>,
+}
+
+enum AccountMutation {
+    SaveOffline(String),
+    Select(crate::account::Account),
+    Remove(crate::account::Account),
 }
 
 impl Launcher {
     /// Starts a validated plan from an installation workflow.
     pub fn start_downloads(&mut self, plan: Vec<Download>) -> Task<Message> {
-        if self.state.launch.active() || self.state.loading_local {
+        if !self.state.home_action_enabled() {
             return Task::none();
         }
         self.state
@@ -58,15 +65,25 @@ impl Launcher {
         let version = VERSIONS[self.state.selected].id;
         let repairing = self.state.launch.version == Some(version) && self.state.launch.repair;
         if self.state.installed.contains(version) && !repairing {
-            if self.state.account_name.is_none() {
+            if self.state.accounts.active().is_none() {
                 self.state.navigate(Page::Accounts);
                 if self.state.account_status.is_empty() {
-                    self.state.account_status = "Save an offline username before playing.".into();
+                    self.state.account_status =
+                        "Select a saved account or add one before playing.".into();
                 }
                 self.state.focus = Control::OfflineName;
                 return operation::focus("offline-name");
             }
             self.state.launch.start(version);
+            if self
+                .state
+                .accounts
+                .active()
+                .is_some_and(|account| account.auth() == crate::account::Auth::Microsoft)
+            {
+                self.state.launch.status =
+                    format!("Checking Minecraft {version} files and Microsoft session…");
+            }
             self.state.focus = Control::VersionPreview;
             return Task::run(launch::start(version), Message::Launch);
         }
@@ -148,7 +165,13 @@ impl Launcher {
             }
             Message::Press(Control::StartDownload) => return self.home_action(),
             Message::Press(Control::DownloadAction) => return self.download_action(),
-            Message::Press(Control::SaveOffline) => return self.save_account(),
+            Message::Press(
+                control @ (Control::SaveOffline
+                | Control::MicrosoftSignIn
+                | Control::CancelMicrosoftSignIn
+                | Control::SelectAccount(_)
+                | Control::RemoveAccount(_)),
+            ) => return self.account_action(control),
             Message::Press(
                 control @ (Control::UpdateFabric | Control::OpenModsFolder | Control::BrowseMods),
             ) => {
@@ -169,15 +192,36 @@ impl Launcher {
             Message::Press(control) => self.state.press(control),
             Message::Focus(backwards) => {
                 self.state.cycle(backwards);
-                if self.state.focus == Control::OfflineName {
-                    return operation::focus("offline-name");
-                }
                 if self.state.page == Page::Accounts {
-                    return operation::focus("unfocused");
+                    let target = if self.state.focus == Control::OfflineName {
+                        "offline-name"
+                    } else {
+                        "unfocused"
+                    };
+                    let y = match self.state.focus {
+                        Control::OfflineName | Control::SaveOffline => 1.,
+                        Control::SelectAccount(i) | Control::RemoveAccount(i) => {
+                            (i + 1) as f32 / (self.state.accounts.entries.len() + 1) as f32
+                        }
+                        _ => 0.,
+                    };
+                    return Task::batch([
+                        operation::focus(target),
+                        operation::snap_to("body", RelativeOffset { x: 0., y }),
+                    ]);
                 }
             }
-            Message::Activate if self.state.focus == Control::SaveOffline => {
-                return self.save_account();
+            Message::Activate
+                if matches!(
+                    self.state.focus,
+                    Control::SaveOffline
+                        | Control::MicrosoftSignIn
+                        | Control::CancelMicrosoftSignIn
+                        | Control::SelectAccount(_)
+                        | Control::RemoveAccount(_)
+                ) =>
+            {
+                return self.account_action(self.state.focus);
             }
             Message::Activate if self.state.focus == Control::OfflineName => {
                 return operation::focus("offline-name");
@@ -185,34 +229,66 @@ impl Launcher {
             Message::OfflineNameChanged(name) => {
                 self.state.focus = Control::OfflineName;
                 self.state.account_input = name;
-                self.state.account_status.clear();
-                return Task::none();
-            }
-            Message::OfflineSaved(result) => {
-                self.state.saving_account = false;
-                match result {
-                    Ok(name) => {
-                        self.state.account_status = format!("Offline profile saved as {name}.");
-                        self.state.account_name = Some(name);
-                    }
-                    Err(error) => self.state.account_status = error,
+                if !self.state.account_busy {
+                    self.state.account_status.clear();
                 }
                 return Task::none();
             }
-            Message::LocalReady(versions, account) => {
-                self.state.loading_local = false;
-                self.state.installed.extend(versions);
-                match account {
-                    Ok(Some(name)) => {
-                        self.state.account_input = name.clone();
-                        self.state.account_name = Some(name);
+            Message::AccountProgress(stage) => {
+                if self.state.sign_in_cancellable
+                    || stage == crate::account::microsoft::Stage::Saving
+                {
+                    self.state.account_status = stage.status().into();
+                }
+                if stage == crate::account::microsoft::Stage::Saving {
+                    self.state.sign_in_cancellable = false;
+                }
+                return Task::none();
+            }
+            Message::AccountsUpdated(result, success) => {
+                self.state.account_busy = false;
+                self.state.sign_in_cancellable = false;
+                self.sign_in_cancel.take();
+                match result {
+                    Ok(accounts) => {
+                        self.state.accounts = accounts;
+                        self.state.account_status = success.into();
                     }
                     Err(error) => self.state.account_status = error,
-                    Ok(None) => {}
+                }
+                if !self.state.tabs().contains(&self.state.focus) {
+                    self.state.focus = Control::Profile;
+                }
+                return self
+                    .close_after_activity
+                    .take()
+                    .map_or_else(Task::none, window::close);
+            }
+            Message::LocalReady(versions, accounts) => {
+                self.state.loading_local = false;
+                self.state.installed.extend(versions);
+                match accounts {
+                    Ok(accounts) => {
+                        if let Some(account) = accounts
+                            .active()
+                            .filter(|account| account.auth() == crate::account::Auth::Offline)
+                        {
+                            self.state.account_input = account.name().into();
+                        }
+                        self.state.accounts = accounts;
+                    }
+                    Err(error) => self.state.account_status = error,
                 }
                 return Task::none();
             }
             Message::Launch(event) => {
+                if let launch::Event::Started {
+                    profile: Some(profile),
+                    ..
+                } = &event
+                {
+                    self.state.accounts.update_profile(profile.clone());
+                }
                 self.state.launch.update(event);
                 if !self.state.launch.active() {
                     self.state.closing_after_game = false;
@@ -231,6 +307,12 @@ impl Launcher {
                 return self.download_action();
             }
             Message::Activate => self.state.press(self.state.focus),
+            Message::Escape
+                if self.state.page == Page::Accounts && self.state.sign_in_cancellable =>
+            {
+                self.cancel_sign_in();
+                return Task::none();
+            }
             Message::Escape => {
                 if self.state.version_family.is_some() {
                     self.state.press(Control::CloseVersions);
@@ -276,6 +358,11 @@ impl Launcher {
                 return self.background.complete(key, handle, self.family());
             }
             Message::CloseRequested(id) => {
+                if self.state.account_busy {
+                    self.close_after_activity = Some(id);
+                    self.cancel_sign_in();
+                    return Task::none();
+                }
                 if self.state.launch.active() {
                     self.state.closing_after_game = true;
                     self.close_after_activity = Some(id);
@@ -362,27 +449,128 @@ impl Launcher {
         }
         refresh
     }
-    fn save_account(&mut self) -> Task<Message> {
-        if self.state.page != Page::Accounts
-            || self.state.loading_local
-            || self.state.saving_account
-        {
+    fn account_action(&mut self, control: Control) -> Task<Message> {
+        use crate::{account, game_directory::GameDirectory};
+
+        if self.state.page != Page::Accounts {
             return Task::none();
         }
-        let name = self.state.account_input.clone();
-        if let Err(error) = crate::account::validate_name(&name) {
-            self.state.account_status = format!("Invalid username. {error}.");
+        if control == Control::CancelMicrosoftSignIn {
+            self.cancel_sign_in();
             return Task::none();
         }
-        self.state.saving_account = true;
+        if control == Control::MicrosoftSignIn {
+            return if state::MICROSOFT_SIGN_IN_ENABLED {
+                self.sign_in()
+            } else {
+                Task::none()
+            };
+        }
+        if !self.state.home_action_enabled() {
+            return Task::none();
+        }
+        let mutation = match control {
+            Control::SaveOffline => {
+                let name = self.state.account_input.clone();
+                if let Err(error) = account::validate_name(&name) {
+                    self.state.account_status = format!("Invalid username. {error}.");
+                    return Task::none();
+                }
+                AccountMutation::SaveOffline(name)
+            }
+            Control::SelectAccount(index) | Control::RemoveAccount(index) => {
+                let Some(account) = self.state.accounts.entries.get(index).cloned() else {
+                    return Task::none();
+                };
+                if matches!(control, Control::SelectAccount(_)) {
+                    AccountMutation::Select(account)
+                } else {
+                    AccountMutation::Remove(account)
+                }
+            }
+            _ => return Task::none(),
+        };
+        self.state.focus = control;
+        self.state.account_busy = true;
+        self.state.account_status = "Updating saved accounts…".into();
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || game::save_account(&name))
-                    .await
-                    .unwrap_or_else(|_| Err("Could not finish saving the offline account.".into()))
+                tokio::task::spawn_blocking(move || {
+                    let directory = GameDirectory::discover()?;
+                    match mutation {
+                        AccountMutation::SaveOffline(name) => {
+                            account::save_offline(&directory, &name)
+                                .map(|accounts| (accounts, "Offline account saved."))
+                                .map_err(Into::into)
+                        }
+                        AccountMutation::Select(account) => account::select(&directory, &account)
+                            .map(|accounts| (accounts, "Active account changed."))
+                            .map_err(Into::into),
+                        AccountMutation::Remove(account) => account::remove(&directory, &account)
+                            .map(|accounts| (accounts, "Account removed.")),
+                    }
+                })
+                .await
+                .unwrap_or(Err(account::microsoft::Error::Worker))
             },
-            Message::OfflineSaved,
+            |result| match result {
+                Ok((accounts, success)) => Message::AccountsUpdated(Ok(accounts), success),
+                Err(error) => Message::AccountsUpdated(Err(error.to_string()), ""),
+            },
         )
+    }
+
+    fn sign_in(&mut self) -> Task<Message> {
+        use futures::SinkExt;
+        if self.state.account_busy {
+            return Task::none();
+        }
+        self.state.focus = Control::MicrosoftSignIn;
+        let client_id = match &self.state.microsoft_client_id {
+            Ok(client_id) => client_id.clone(),
+            Err(error) => {
+                self.state.account_status = error.to_string();
+                return Task::none();
+            }
+        };
+        if !self.state.home_action_enabled() {
+            self.state.account_status =
+                "Wait for the current launcher activity to finish, then try Microsoft sign-in again."
+                    .into();
+            return Task::none();
+        }
+        let (sender, cancel) = crate::download::cancellation();
+        self.sign_in_cancel = Some(sender);
+        self.state.account_busy = true;
+        self.state.sign_in_cancellable = true;
+        self.state.focus = Control::CancelMicrosoftSignIn;
+        self.state.account_status = "Opening Microsoft sign-in…".into();
+        Task::run(
+            iced::stream::channel(
+                8,
+                move |mut events: futures::channel::mpsc::Sender<Message>| async move {
+                    let result = crate::account::microsoft::sign_in(&client_id, cancel, |stage| {
+                        let _ = events.try_send(Message::AccountProgress(stage));
+                    })
+                    .await
+                    .map_err(|error| error.to_string());
+                    let _ = events
+                        .send(Message::AccountsUpdated(result, "Microsoft account saved."))
+                        .await;
+                },
+            ),
+            std::convert::identity,
+        )
+    }
+
+    fn cancel_sign_in(&mut self) {
+        if self.state.sign_in_cancellable
+            && let Some(sender) = self.sign_in_cancel.take()
+        {
+            let _ = sender.send(());
+            self.state.sign_in_cancellable = false;
+            self.state.account_status = "Cancelling Microsoft sign-in…".into();
+        }
     }
 
     fn family(&self) -> &'static str {
@@ -416,11 +604,83 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::microsoft::{Error as SignInError, Stage as SignInStage};
+
+    #[test]
+    fn disabled_microsoft_sign_in_cannot_be_focused_or_activated() {
+        let mut launcher = Launcher::default();
+        launcher.state.navigate(Page::Accounts);
+        launcher.state.microsoft_client_id = Ok("11111111-2222-3333-4444-555555555555".into());
+        assert!(!launcher.state.tabs().contains(&Control::MicrosoftSignIn));
+        assert_eq!(
+            launcher
+                .update(Message::Press(Control::MicrosoftSignIn))
+                .units(),
+            0
+        );
+        launcher.state.focus = Control::MicrosoftSignIn;
+        assert_eq!(launcher.update(Message::Activate).units(), 0);
+        assert!(!launcher.state.account_busy);
+    }
+
+    #[test]
+    fn microsoft_sign_in_explains_configuration_errors() {
+        for error in [SignInError::MissingClientId, SignInError::InvalidClientId] {
+            let mut launcher = Launcher::default();
+            launcher.state.navigate(Page::Accounts);
+            launcher.state.microsoft_client_id = Err(error);
+
+            assert_eq!(launcher.sign_in().units(), 0);
+            assert_eq!(launcher.state.account_status, error.to_string());
+            assert!(
+                launcher
+                    .state
+                    .account_status
+                    .contains("AVERION_MICROSOFT_CLIENT_ID")
+            );
+            assert!(launcher.state.account_status.contains("http://localhost"));
+            assert!(!launcher.state.account_busy);
+        }
+    }
+
+    #[test]
+    fn microsoft_sign_in_shows_progress_and_startup_failure() {
+        let mut launcher = Launcher::default();
+        launcher.state.navigate(Page::Accounts);
+        launcher.state.microsoft_client_id = Ok("11111111-2222-3333-4444-555555555555".into());
+        launcher.state.loading_local = true;
+
+        assert_eq!(launcher.sign_in().units(), 0);
+        assert!(
+            launcher
+                .state
+                .account_status
+                .contains("current launcher activity")
+        );
+        let _ = launcher.update(Message::LocalReady(vec![], Ok(Default::default())));
+
+        let task = launcher.sign_in();
+        assert_ne!(task.units(), 0);
+        assert_eq!(launcher.state.account_status, "Opening Microsoft sign-in…");
+        assert!(launcher.state.account_busy);
+        assert_eq!(launcher.state.focus, Control::CancelMicrosoftSignIn);
+        let _ = launcher.update(Message::AccountProgress(SignInStage::Browser));
+        assert_eq!(launcher.state.account_status, SignInStage::Browser.status());
+
+        let error = SignInError::OpenBrowser.to_string();
+        let _ = launcher.update(Message::AccountsUpdated(Err(error.clone()), ""));
+        assert_eq!(launcher.state.account_status, error);
+        assert!(!launcher.state.account_busy);
+        assert!(!launcher.state.sign_in_cancellable);
+    }
 
     #[test]
     fn mods_update_uses_the_existing_installation_workflow() {
         let mut launcher = Launcher::default();
-        let _ = launcher.update(Message::LocalReady(vec!["1.20"], Ok(None)));
+        let _ = launcher.update(Message::LocalReady(
+            vec!["1.20"],
+            Ok(crate::account::Accounts::default()),
+        ));
         let _ = launcher.update(Message::Press(Control::Nav(Page::Mods)));
         assert!(launcher.state.tabs().contains(&Control::UpdateFabric));
 
@@ -494,12 +754,21 @@ mod tests {
     #[test]
     fn home_play_waits_for_an_account_and_prevents_duplicate_launches() {
         let mut launcher = Launcher::default();
-        let _ = launcher.update(Message::LocalReady(vec!["1.20"], Ok(None)));
+        let _ = launcher.update(Message::LocalReady(
+            vec!["1.20"],
+            Ok(crate::account::Accounts::default()),
+        ));
         let _ = launcher.update(Message::Press(Control::StartDownload));
         assert_eq!(launcher.state.page, Page::Accounts);
         assert!(!launcher.state.launch.active());
 
-        let _ = launcher.update(Message::OfflineSaved(Ok("OfflinePlayer".into())));
+        let base = tempfile::tempdir().unwrap();
+        let directory = crate::game_directory::GameDirectory::for_test(base.path());
+        let accounts = crate::account::save_offline(&directory, "OfflinePlayer").unwrap();
+        let _ = launcher.update(Message::AccountsUpdated(
+            Ok(accounts),
+            "Offline account saved.",
+        ));
         let _ = launcher.update(Message::Press(Control::Nav(Page::Home)));
         let _ = launcher.update(Message::Focus(false));
         let _ = launcher.update(Message::Activate);

@@ -37,7 +37,7 @@ impl fmt::Display for Error {
 }
 
 impl Https {
-    fn client(&self) -> Result<&Client, Error> {
+    pub(crate) fn client(&self) -> Result<&Client, Error> {
         if let Some(client) = self.0.get() {
             return Ok(client);
         }

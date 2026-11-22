@@ -17,6 +17,9 @@ pub const CYAN: Color = color!(0x67def2);
 pub const TEXT: Color = color!(0xf1f6fa);
 pub const MUTED: Color = color!(0xbfcedb);
 pub const SUB: Color = color!(0xa4b6c8);
+pub const SUCCESS: Color = color!(0x82dea9);
+pub const WARNING: Color = color!(0xf2c475);
+pub const DANGER: Color = color!(0xff9b9b);
 pub const GAP: u32 = 12;
 pub const INSET: u32 = 16;
 pub const RADIUS: f32 = 8.0;
@@ -28,9 +31,9 @@ pub fn dark() -> Theme {
             background: BASE,
             text: TEXT,
             primary: BLUE,
-            success: color!(0x82dea9),
-            warning: color!(0xf2c475),
-            danger: color!(0xff9b9b),
+            success: SUCCESS,
+            warning: WARNING,
+            danger: DANGER,
         },
     )
 }

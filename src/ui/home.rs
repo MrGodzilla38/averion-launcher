@@ -2,6 +2,11 @@ use super::*;
 use crate::{app::installation::Installation, download::Stage};
 use iced::widget::{column, progress_bar};
 
+const MINECRAFT_FONT: iced::Font = iced::Font {
+    weight: iced::font::Weight::Medium,
+    ..iced::Font::with_name("Minecraft")
+};
+
 fn version_preview(state: &State) -> View {
     let entry = &VERSIONS[state.selected];
     let (width, height) = if state.compact {
@@ -16,10 +21,7 @@ fn version_preview(state: &State) -> View {
     let digits = |ink| {
         text(entry.id)
             .size(if state.compact { 24 } else { 32 })
-            .font(iced::Font {
-                weight: iced::font::Weight::Medium,
-                ..iced::Font::with_name("Minecraft")
-            })
+            .font(MINECRAFT_FONT)
             .color(ink)
     };
     let label = stack![
@@ -126,31 +128,34 @@ pub(super) fn view(state: &State) -> View {
         .into()
 }
 
+fn launch_button_label(state: &State, version: &str) -> (&'static str, iced::Color) {
+    let launch = &state.launch;
+    if state.loading_local {
+        ("LOADING", MUTED)
+    } else if state.installation.is_active() {
+        ("INSTALLING", WARNING)
+    } else if launch.active() {
+        if launch.running {
+            ("RUNNING", SUCCESS)
+        } else {
+            ("STARTING", WARNING)
+        }
+    } else if launch.version == Some(version) && launch.repair {
+        ("REPAIR", DANGER)
+    } else if state.installed.contains(version) {
+        ("PLAY", SUCCESS)
+    } else {
+        ("DOWNLOAD", BLUE)
+    }
+}
+
 fn launch_control(state: &State) -> View {
-    let active = state.installation.is_active();
     let width = if state.compact { 210 } else { 246 };
     let version = VERSIONS[state.selected].id;
     let installed = state.installed.contains(version);
     let launch = &state.launch;
-    let label = text(if state.loading_local {
-        "LOADING"
-    } else if active {
-        "INSTALLING"
-    } else if launch.active() {
-        if launch.running {
-            "RUNNING"
-        } else {
-            "STARTING"
-        }
-    } else if launch.version == Some(version) && launch.repair {
-        "REPAIR"
-    } else if installed {
-        "PLAY"
-    } else {
-        "DOWNLOAD"
-    })
-    .size(20)
-    .font(iced::Font::with_name("Minecraft"));
+    let (label, accent) = launch_button_label(state, version);
+    let label = text(label).size(20).font(MINECRAFT_FONT);
     let focused = state.focus == Control::StartDownload;
     let main = button(container(label).center(Fill))
         .width(width)
@@ -160,24 +165,7 @@ fn launch_control(state: &State) -> View {
                 .home_action_enabled()
                 .then_some(Message::Press(Control::StartDownload)),
         )
-        .style(move |_, state| {
-            let (fill, ink) = match state {
-                button::Status::Disabled => (SELECTED, MUTED),
-                button::Status::Hovered => (PRIMARY_HOVER, PANEL),
-                button::Status::Pressed => (PRIMARY_PRESSED, PANEL),
-                button::Status::Active => (BLUE, PANEL),
-            };
-            button::Style {
-                background: Some(fill.into()),
-                text_color: ink,
-                border: iced::Border {
-                    color: if focused { CYAN } else { BLUE },
-                    width: if focused { 2. } else { 1. },
-                    radius: RADIUS.into(),
-                },
-                ..Default::default()
-            }
-        });
+        .style(move |_, status| launch_button_style(accent, focused, status));
     let controls = column![main].spacing(4).align_x(Alignment::Center);
     let controls = match &state.installation {
         Installation::Idle => {
@@ -204,7 +192,7 @@ fn launch_control(state: &State) -> View {
         }
         Installation::Failed { error, .. } => controls
             .push(text(error.to_string()).size(14).color(MUTED))
-            .push(download_action(state, "Retry")),
+            .push(download_action(state, "RETRY", None)),
         Installation::Active {
             progress, cancel, ..
         } => {
@@ -270,14 +258,101 @@ fn launch_control(state: &State) -> View {
                     (!indicator.is_empty())
                         .then(|| View::from(text(indicator).size(13).color(MUTED))),
                 )
-                .extend(cancel.is_some().then(|| download_action(state, "Cancel")))
+                .extend(
+                    cancel
+                        .is_some()
+                        .then(|| download_action(state, "CANCEL", Some(DANGER))),
+                )
         }
     };
     controls.into()
 }
 
-fn download_action(state: &State, label: &'static str) -> View {
-    action(state, Control::DownloadAction, text(label).size(14), false)
-        .height(44)
-        .into()
+fn launch_button_style(
+    accent: iced::Color,
+    focused: bool,
+    status: button::Status,
+) -> button::Style {
+    let blend = |base: iced::Color, amount: f32| {
+        iced::Color::from_rgb(
+            accent.r + (base.r - accent.r) * amount,
+            accent.g + (base.g - accent.g) * amount,
+            accent.b + (base.b - accent.b) * amount,
+        )
+    };
+    let (fill, ink) = match status {
+        button::Status::Disabled => (blend(PANEL, 0.85), accent),
+        button::Status::Hovered if accent == BLUE => (PRIMARY_HOVER, PANEL),
+        button::Status::Pressed if accent == BLUE => (PRIMARY_PRESSED, PANEL),
+        button::Status::Hovered => (blend(iced::Color::WHITE, 0.18), PANEL),
+        button::Status::Pressed => (blend(PANEL, 0.15), PANEL),
+        button::Status::Active => (accent, PANEL),
+    };
+    button::Style {
+        background: Some(fill.into()),
+        text_color: ink,
+        border: iced::Border {
+            color: if focused { CYAN } else { accent },
+            width: if focused { 2. } else { 1. },
+            radius: RADIUS.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn download_action(state: &State, label: &'static str, accent: Option<iced::Color>) -> View {
+    let control = action(
+        state,
+        Control::DownloadAction,
+        text(label).size(14).font(MINECRAFT_FONT),
+        false,
+    )
+    .height(44);
+    match accent {
+        Some(accent) => {
+            let focused = state.focus == Control::DownloadAction;
+            control
+                .style(move |_, status| launch_button_style(accent, focused, status))
+                .into()
+        }
+        None => control.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_button_pairs_labels_with_activity_colors() {
+        let mut state = State::default();
+        let version = VERSIONS[state.selected].id;
+        assert_eq!(launch_button_label(&state, version), ("DOWNLOAD", BLUE));
+
+        state.loading_local = true;
+        assert_eq!(launch_button_label(&state, version), ("LOADING", MUTED));
+        state.loading_local = false;
+
+        let installation =
+            state
+                .installation
+                .start_selected(version, false, crate::mojang::Mojang::default());
+        assert_eq!(
+            launch_button_label(&state, version),
+            ("INSTALLING", WARNING)
+        );
+        drop(installation);
+        state.installation = Installation::Idle;
+        state.installed.insert(version);
+        assert_eq!(launch_button_label(&state, version), ("PLAY", SUCCESS));
+
+        state.launch.start(version);
+        assert_eq!(launch_button_label(&state, version), ("STARTING", WARNING));
+        state.launch.running = true;
+        assert_eq!(launch_button_label(&state, version), ("RUNNING", SUCCESS));
+
+        state.launch.active = false;
+        state.launch.repair = true;
+        assert_eq!(launch_button_label(&state, version), ("REPAIR", DANGER));
+    }
 }

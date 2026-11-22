@@ -1,6 +1,7 @@
 pub(crate) mod background;
 mod game;
 pub(crate) mod installation;
+mod profile_skin;
 pub(crate) mod state;
 
 use crate::{
@@ -66,13 +67,8 @@ impl Launcher {
         let repairing = self.state.launch.version == Some(version) && self.state.launch.repair;
         if self.state.installed.contains(version) && !repairing {
             if self.state.accounts.active().is_none() {
-                self.state.navigate(Page::Accounts);
-                if self.state.account_status.is_empty() {
-                    self.state.account_status =
-                        "Select a saved account or add one before playing.".into();
-                }
-                self.state.focus = Control::OfflineName;
-                return operation::focus("offline-name");
+                self.state.focus = Control::Profile;
+                return operation::snap_to("body", RelativeOffset::START);
             }
             self.state.launch.start(version);
             if self
@@ -153,6 +149,23 @@ impl Launcher {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_state(message);
+        let name = self
+            .state
+            .accounts
+            .active()
+            .map(crate::account::Account::name);
+        let skin = self
+            .state
+            .skin
+            .sync(self.state.page == Page::Accounts, name);
+        match skin {
+            Some(skin) => Task::batch([task, skin]),
+            None => task,
+        }
+    }
+
+    fn update_state(&mut self, message: Message) -> Task<Message> {
         let previous = self.family();
         let page = self.state.page;
         match message {
@@ -263,6 +276,10 @@ impl Launcher {
                     .close_after_activity
                     .take()
                     .map_or_else(Task::none, window::close);
+            }
+            Message::ProfileSkinReady(request, result) => {
+                self.state.skin.complete(request, result);
+                return Task::none();
             }
             Message::LocalReady(versions, accounts) => {
                 self.state.loading_local = false;
@@ -759,8 +776,11 @@ mod tests {
             Ok(crate::account::Accounts::default()),
         ));
         let _ = launcher.update(Message::Press(Control::StartDownload));
-        assert_eq!(launcher.state.page, Page::Accounts);
+        assert_eq!(launcher.state.page, Page::Home);
+        assert_eq!(launcher.state.focus, Control::Profile);
         assert!(!launcher.state.launch.active());
+        let _ = launcher.update(Message::Activate);
+        assert_eq!(launcher.state.page, Page::Accounts);
 
         let base = tempfile::tempdir().unwrap();
         let directory = crate::game_directory::GameDirectory::for_test(base.path());

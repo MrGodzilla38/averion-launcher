@@ -180,6 +180,8 @@ fn launch_control(state: &State) -> View {
                 }
             } else if state.loading_local {
                 "Reading local installations…".into()
+            } else if installed && state.accounts.active().is_none() {
+                "Choose or add an account under Profile to play.".into()
             } else if installed {
                 format!("Minecraft {version} with Fabric is installed.")
             } else {

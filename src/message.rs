@@ -11,11 +11,10 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Self; 7] = [
+    pub const NAVIGATION: [Self; 6] = [
         Self::Home,
         Self::Versions,
         Self::Mods,
-        Self::Accounts,
         Self::Settings,
         Self::News,
         Self::Friends,
@@ -73,6 +72,10 @@ pub enum Message {
     OfflineNameChanged(String),
     AccountProgress(crate::account::microsoft::Stage),
     AccountsUpdated(Result<crate::account::Accounts, String>, &'static str),
+    ProfileSkinReady(
+        u64,
+        Result<iced::widget::image::Handle, crate::account::skin::Error>,
+    ),
     Launch(crate::launch::Event),
     WindowOpened(iced::window::Id, iced::Size),
     Resize(iced::Size),

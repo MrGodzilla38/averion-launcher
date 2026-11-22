@@ -22,6 +22,7 @@ pub struct State {
     pub closing_after_game: bool,
     pub launch: super::game::Launch,
     pub accounts: crate::account::Accounts,
+    pub(crate) skin: super::profile_skin::Preview,
     pub account_input: String,
     pub account_status: String,
     pub mods_status: String,
@@ -50,6 +51,7 @@ impl Default for State {
             closing_after_game: false,
             launch: super::game::Launch::default(),
             accounts: crate::account::Accounts::default(),
+            skin: super::profile_skin::Preview::default(),
             account_input: String::new(),
             account_status: String::new(),
             mods_status: String::new(),
@@ -87,10 +89,10 @@ impl State {
         if self.compact {
             order.extend([Control::Nav(Page::Home), Control::Menu, Control::Profile]);
             if self.menu {
-                order.extend(Page::ALL[1..].iter().copied().map(Control::Nav));
+                order.extend(Page::NAVIGATION[1..].iter().copied().map(Control::Nav));
             }
         } else {
-            order.extend(Page::ALL.map(Control::Nav));
+            order.extend(Page::NAVIGATION.map(Control::Nav));
             order.push(Control::Profile);
         }
         match self.page {
@@ -152,7 +154,9 @@ impl State {
             self.compact = compact;
             self.menu = false;
             if !self.tabs().contains(&self.focus) {
-                self.focus = if compact {
+                self.focus = if self.page == Page::Accounts {
+                    Control::Profile
+                } else if compact {
                     Control::Menu
                 } else {
                     Control::Nav(self.page)
@@ -182,7 +186,8 @@ impl State {
             return;
         }
         match control {
-            Control::Nav(page) => self.navigate(page),
+            Control::Nav(page) if Page::NAVIGATION.contains(&page) => self.navigate(page),
+            Control::Nav(_) => {}
             Control::Profile => self.navigate(Page::Accounts),
             Control::News => self.navigate(Page::News),
             Control::Menu => {
@@ -295,6 +300,34 @@ mod tests {
         assert!(!state.menu);
         state.press(Control::Motion);
         assert!(!state.motion);
+    }
+
+    #[test]
+    fn accounts_are_only_reachable_from_the_profile_control() {
+        use crate::message::{Control, Page};
+
+        let mut state = State::default();
+        for compact in [false, true] {
+            state.navigate(Page::Home);
+            state.resize(compact);
+            if compact {
+                state.press(Control::Menu);
+            }
+            let tabs = state.tabs();
+            assert!(tabs.contains(&Control::Profile));
+            assert!(!tabs.contains(&Control::Nav(Page::Accounts)));
+            state.press(Control::Nav(Page::Accounts));
+            assert_eq!(state.page, Page::Home);
+            state.press(Control::Profile);
+            assert_eq!(
+                (state.page, state.focus),
+                (Page::Accounts, Control::Profile)
+            );
+            assert!(!state.menu);
+        }
+        state.press(Control::Menu);
+        state.resize(false);
+        assert_eq!(state.focus, Control::Profile);
     }
 
     #[test]

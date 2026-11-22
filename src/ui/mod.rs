@@ -2,6 +2,7 @@ pub(crate) mod art;
 mod home;
 pub mod input;
 mod pages;
+mod profile;
 
 use crate::{
     app::state::State,
@@ -48,21 +49,22 @@ fn nav_item(state: &State, page: Page) -> View {
 fn navigation(state: &State, arrival: f32) -> View {
     let mut links = row![].spacing(2).align_y(Alignment::Center);
     if state.compact {
+        let secondary_selected = Page::NAVIGATION[1..].contains(&state.page);
         links = links.push(nav_item(state, Page::Home)).push(action(
             state,
             Control::Menu,
             text(if state.menu {
                 "Close  ×"
-            } else if state.page != Page::Home {
+            } else if secondary_selected {
                 state.page.label()
             } else {
                 "Menu  ▾"
             })
             .size(15),
-            state.menu || state.page != Page::Home,
+            state.menu || secondary_selected,
         ));
     } else {
-        links = links.extend(Page::ALL.map(|p| nav_item(state, p)));
+        links = links.extend(Page::NAVIGATION.map(|p| nav_item(state, p)));
     }
     let brand = row![art::icon(7, 28), bold("Averion", 21)]
         .align_y(Alignment::Center)
@@ -99,7 +101,7 @@ fn navigation(state: &State, arrival: f32) -> View {
     let mut nav = column![top];
     if state.menu && state.compact {
         nav = nav.push(
-            row(Page::ALL[1..].iter().map(|p| nav_item(state, *p)))
+            row(Page::NAVIGATION[1..].iter().map(|p| nav_item(state, *p)))
                 .spacing(2)
                 .wrap(),
         );

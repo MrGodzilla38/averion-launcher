@@ -12,7 +12,7 @@ Phase 03 opens at **1120 × 720 logical client pixels** and requests a **640 × 
 
 | Reading order | Placement and content |
 |---|---|
-| 1 · Top bar | Averion wordmark at left. Home, Versions, Mods, Accounts, Settings, News, Social / Friends across the available center. Profile trigger at right. Each destination pairs a labelled outline icon with text, with underlined current location. Friends is an acceptable short label for Social / Friends. |
+| 1 · Top bar | Averion wordmark at left. Home, Versions, Mods, Settings, News, Social / Friends across the available center. The Profile control at right opens the account screen. Each destination pairs a labelled outline icon with text, with underlined current location. Friends is an acceptable short label for Social / Friends. |
 | 2 · Scene and version stage | The version's terrain fills the client background, cropped to cover with a per-image focal point. Place the horizon in the upper third, outside caption and button regions. A sharp, smaller crop inside the selected card gives the blurred background context. No additional hero slogan or duplicate title. |
 | 3 · Launch and status | One centered Launch control directly below selection, 16 gap. Beneath it, one line for the operation and target, expanding for a genuine error. Place any recovery action here. Keep Startup details (F1) as a quiet disclosure. |
 | 4 · Announcements | A short strip beneath the action area. One Minecraft item and one Averion item, each identified in text. Put additional items on News. Never rotate automatically. |

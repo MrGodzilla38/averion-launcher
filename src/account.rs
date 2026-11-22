@@ -1,6 +1,7 @@
 //! Public account identities, their active selection, and Minecraft launch sessions.
 
 pub(crate) mod microsoft;
+pub(crate) mod skin;
 mod vault;
 
 use crate::game_directory::GameDirectory;

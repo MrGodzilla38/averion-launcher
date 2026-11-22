@@ -1,5 +1,5 @@
 use super::*;
-use iced::widget::column;
+use iced::widget::{column, text_input};
 
 pub(super) fn sources(compact: bool) -> View {
     let source = |name, body| {
@@ -77,16 +77,7 @@ pub(super) fn view(state: &State) -> View {
         Page::Accounts => (
             "Accounts",
             "Manage the player profile used by the launcher.",
-            row![
-                art::icon(8, 42),
-                note(
-                    "No account connected",
-                    "Sign-in and account switching are unavailable."
-                )
-            ]
-            .spacing(INSET)
-            .align_y(Alignment::Center)
-            .into(),
+            offline_account(state),
         ),
         Page::News => (
             "News",
@@ -144,6 +135,44 @@ pub(super) fn view(state: &State) -> View {
         .center_x(Fill)
         .into()
 }
+fn offline_account(state: &State) -> View {
+    let ready = !state.loading_local && !state.saving_account;
+    let mut input = text_input("Enter a Minecraft username", &state.account_input)
+        .id("offline-name")
+        .padding(12)
+        .width(Length::Fill);
+    if ready {
+        input = input
+            .on_input(Message::OfflineNameChanged)
+            .on_submit(Message::Press(Control::SaveOffline));
+    }
+    let submit = action(
+        state,
+        Control::SaveOffline,
+        text(if state.saving_account {
+            "Saving…"
+        } else {
+            "Save offline profile"
+        }),
+        false,
+    )
+    .height(44)
+    .on_press_maybe(ready.then_some(Message::Press(Control::SaveOffline)));
+    let mut form = column![
+        bold("Offline username", 18),
+        input,
+        text("Use 3–16 letters, numbers, or underscores. Microsoft sign-in is unavailable.")
+            .size(14)
+            .color(SUB),
+        submit,
+    ]
+    .spacing(8);
+    if !state.account_status.is_empty() {
+        form = form.push(text(state.account_status.clone()).size(14).color(SUB));
+    }
+    row![art::icon(8, 42), form].spacing(INSET).into()
+}
+
 fn note(title: &'static str, body: &'static str) -> View {
     column![bold(title, 18), text(body).size(15).color(SUB)]
         .spacing(6)

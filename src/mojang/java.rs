@@ -1,4 +1,5 @@
 mod detect;
+pub(crate) use detect::configure;
 mod package;
 
 use super::{
@@ -21,7 +22,7 @@ const CATALOG_LIMIT: usize = 1024 * 1024;
 const PACKAGE_LIMIT: usize = 2 * 1024 * 1024;
 const CATALOG_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Runtime {
     pub executable: PathBuf,
     pub major: u16,
@@ -126,6 +127,25 @@ pub(super) async fn resolve(
         return Ok(runtime);
     }
     managed(requirement, directory, https, cancel, report).await
+}
+
+/// Probes a specific executable for the required Java major version. Used by
+/// the launch engine to re-validate the runtime recorded at install time.
+pub(super) async fn probe(
+    executable: PathBuf,
+    major: u16,
+    cancel: &Cancellation,
+) -> Result<Option<Runtime>, Failure> {
+    detect::compatible(executable, major, cancel).await
+}
+
+/// Looks for a compatible system Java outside the managed runtime directory.
+pub(super) async fn probe_system(
+    major: u16,
+    managed_root: &Path,
+    cancel: &Cancellation,
+) -> Result<Option<Runtime>, Failure> {
+    detect::system_java(major, managed_root, cancel).await
 }
 
 async fn managed(

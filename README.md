@@ -2,7 +2,7 @@
 
 A native Rust desktop launcher for Minecraft Java Edition, targeting Vanilla on x86_64 Linux and Windows. The launcher shell has seven destinations, original offline scenery, a selected-version preview linking to Versions and a session-only Reduced motion control. Click **Startup details** or press **F1** to inspect the interface and renderer.
 
-Select a Minecraft release and press **Download** on Home. Averion verifies the selected release's game files, extracts its native libraries, and selects a compatible 64-bit Java runtime using Mojang's version metadata. It can reuse system Java or provision Mojang's runtime under `.averion/java/`. Progress, Cancel, and Retry are available from Home. Averion stores its files under `~/.averion/` on Linux and `%APPDATA%\.averion\` on Windows. Accounts and game launching belong to later phases. [Download and Java architecture](docs/ARCHITECTURE.md#java-runtime-management)
+Select a Minecraft release and press **Download** on Home. Averion verifies the selected release's game files, extracts its native libraries, and selects a compatible 64-bit Java runtime using Mojang's version metadata. It can reuse system Java or provision Mojang's runtime under `.averion/java/`. Progress, Cancel, and Retry are available from Home. Averion stores its files under `~/.averion/` on Linux and `%APPDATA%\.averion\` on Windows. After installation, save an offline username under **Accounts**, then select **Play** on Home. Play revalidates the installation and starts Minecraft in a separate process. Use **Repair** if Averion finds missing or damaged files. The latest launch status names the output folder under `.averion/logs/`. [Download and Java architecture](docs/ARCHITECTURE.md#java-runtime-management)
 
 ## Build and run
 
@@ -26,7 +26,7 @@ The release binary is under `target/release/` as `averion-launcher` on Linux or 
 
 Cargo builds one Rust executable. Iced handles events, widgets and rendering through tiny-skia. Future Minecraft logic belongs in UI-independent Rust modules. SQLite is a candidate for the future local database. The database choice awaits user approval.
 
-Future account support requires secure Microsoft authentication and OS credential storage for authentication secrets. The authentication flow and platform-specific storage choices still require research and user approval.
+Offline profiles support local play with a UUID derived from the username. Microsoft sign-in, account ownership, entitlement checks, and authenticated multiplayer are pending.
 
 The launcher must be usable on a computer with **2 GB of total physical RAM**, including its rendering resources and any helper processes. Minecraft has separate requirements. Constrained-system performance measurements and Windows runtime validation are pending. GitHub Actions checks formatting, runs tests and Clippy, checks compilation and builds the release on Linux and Windows.
 

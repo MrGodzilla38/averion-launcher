@@ -1,10 +1,12 @@
 pub(crate) mod background;
+mod game;
 pub(crate) mod installation;
 pub(crate) mod state;
 
 use crate::{
     catalog::VERSIONS,
     download::Download,
+    launch,
     message::{Control, Message, Page},
     mojang::Mojang,
     ui,
@@ -31,12 +33,16 @@ pub struct Launcher {
     transition: Option<Transition>,
     background: background::Background,
     mojang: Mojang,
-    close_after_download: Option<window::Id>,
+    close_after_activity: Option<window::Id>,
+    read_local_started: bool,
 }
 
 impl Launcher {
     /// Starts a validated plan from an installation workflow.
     pub fn start_downloads(&mut self, plan: Vec<Download>) -> Task<Message> {
+        if self.state.launch.active() || self.state.loading_local {
+            return Task::none();
+        }
         self.state
             .installation
             .start(Arc::from(plan))
@@ -45,25 +51,44 @@ impl Launcher {
             })
     }
 
-    fn download_selected(&mut self) -> Task<Message> {
-        if self.state.page != Page::Home {
+    fn home_action(&mut self) -> Task<Message> {
+        if self.state.page != Page::Home || !self.state.home_action_enabled() {
             return Task::none();
         }
         let version = VERSIONS[self.state.selected].id;
-        let Some(events) = self
-            .state
-            .installation
-            .start_selected(version, self.mojang.clone())
+        let repairing = self.state.launch.version == Some(version) && self.state.launch.repair;
+        if self.state.installed.contains(version) && !repairing {
+            if self.state.account_name.is_none() {
+                self.state.navigate(Page::Accounts);
+                if self.state.account_status.is_empty() {
+                    self.state.account_status = "Save an offline username before playing.".into();
+                }
+                self.state.focus = Control::OfflineName;
+                return operation::focus("offline-name");
+            }
+            self.state.launch.start(version);
+            self.state.focus = Control::VersionPreview;
+            return Task::run(launch::start(version), Message::Launch);
+        }
+        let Some(events) =
+            self.state
+                .installation
+                .start_selected(version, repairing, self.mojang.clone())
         else {
             return Task::none();
         };
-        self.state.verified_versions.remove(version);
+        if repairing {
+            self.state.installed.remove(version);
+        }
+        if self.state.launch.version == Some(version) {
+            self.state.launch = game::Launch::default();
+        }
         self.state.focus = Control::DownloadAction;
         Task::run(events, Message::Installation)
     }
 
     fn download_action(&mut self) -> Task<Message> {
-        if self.state.page != Page::Home {
+        if self.state.page != Page::Home || self.state.launch.active() {
             return Task::none();
         }
         self.state.installation.cancel();
@@ -93,12 +118,69 @@ impl Launcher {
                 self.state.toggle_details();
                 self.state.focus = Control::Details;
             }
-            Message::Press(Control::StartDownload) => return self.download_selected(),
+            Message::Press(Control::StartDownload) => return self.home_action(),
             Message::Press(Control::DownloadAction) => return self.download_action(),
+            Message::Press(Control::SaveOffline) => return self.save_account(),
             Message::Press(control) => self.state.press(control),
-            Message::Focus(backwards) => self.state.cycle(backwards),
+            Message::Focus(backwards) => {
+                self.state.cycle(backwards);
+                if self.state.focus == Control::OfflineName {
+                    return operation::focus("offline-name");
+                }
+                if self.state.page == Page::Accounts {
+                    return operation::focus("unfocused");
+                }
+            }
+            Message::Activate if self.state.focus == Control::SaveOffline => {
+                return self.save_account();
+            }
+            Message::Activate if self.state.focus == Control::OfflineName => {
+                return operation::focus("offline-name");
+            }
+            Message::OfflineNameChanged(name) => {
+                self.state.focus = Control::OfflineName;
+                self.state.account_input = name;
+                self.state.account_status.clear();
+                return Task::none();
+            }
+            Message::OfflineSaved(result) => {
+                self.state.saving_account = false;
+                match result {
+                    Ok(name) => {
+                        self.state.account_status = format!("Offline profile saved as {name}.");
+                        self.state.account_name = Some(name);
+                    }
+                    Err(error) => self.state.account_status = error,
+                }
+                return Task::none();
+            }
+            Message::LocalReady(versions, account) => {
+                self.state.loading_local = false;
+                self.state.installed.extend(versions);
+                match account {
+                    Ok(Some(name)) => {
+                        self.state.account_input = name.clone();
+                        self.state.account_name = Some(name);
+                    }
+                    Err(error) => self.state.account_status = error,
+                    Ok(None) => {}
+                }
+                return Task::none();
+            }
+            Message::Launch(event) => {
+                self.state.launch.update(event);
+                if !self.state.launch.active() {
+                    self.state.closing_after_game = false;
+                }
+                if !self.state.launch.active()
+                    && let Some(id) = self.close_after_activity.take()
+                {
+                    return window::close(id);
+                }
+                return Task::none();
+            }
             Message::Activate if self.state.focus == Control::StartDownload => {
-                return self.download_selected();
+                return self.home_action();
             }
             Message::Activate if self.state.focus == Control::DownloadAction => {
                 return self.download_action();
@@ -115,7 +197,26 @@ impl Launcher {
             Message::WindowOpened(id, size) => {
                 self.background.size = size;
                 self.state.resize(size.width < COMPACT_WIDTH as f32);
-                return window::scale_factor(id).map(Message::Rescale);
+                let scale = window::scale_factor(id).map(Message::Rescale);
+                if self.read_local_started {
+                    return scale;
+                }
+                self.read_local_started = true;
+                self.state.loading_local = true;
+                let local = Task::perform(
+                    async {
+                        tokio::task::spawn_blocking(game::read_local)
+                            .await
+                            .unwrap_or_else(|_| {
+                                (
+                                    Vec::new(),
+                                    Err("Could not read local launcher data.".into()),
+                                )
+                            })
+                    },
+                    |(versions, account)| Message::LocalReady(versions, account),
+                );
+                return Task::batch([scale, local]);
             }
             Message::Resize(size) => {
                 self.background.size = size;
@@ -130,8 +231,14 @@ impl Launcher {
                 return self.background.complete(key, handle, self.family());
             }
             Message::CloseRequested(id) => {
+                if self.state.launch.active() {
+                    self.state.closing_after_game = true;
+                    self.close_after_activity = Some(id);
+                    self.state.navigate(Page::Home);
+                    return Task::none();
+                }
                 if self.state.installation.is_active() {
-                    self.close_after_download = Some(id);
+                    self.close_after_activity = Some(id);
                     self.state.installation.cancel();
                     return Task::none();
                 }
@@ -139,15 +246,18 @@ impl Launcher {
             }
             Message::Installation(event) => {
                 let finished = matches!(event, installation::Event::Finished(_));
-                if let Some((version, runtime)) = self.state.installation.update(event) {
-                    self.state.verified_versions.insert(version, runtime);
+                if let Some((version, _runtime)) = self.state.installation.update(event) {
+                    self.state.installed.insert(version);
+                    if self.state.launch.version == Some(version) {
+                        self.state.launch = game::Launch::default();
+                    }
                 }
                 if self.state.focus == Control::DownloadAction
                     && !self.state.installation.has_action()
                 {
                     self.state.focus = Control::Details;
                 }
-                if finished && let Some(id) = self.close_after_download.take() {
+                if finished && let Some(id) = self.close_after_activity.take() {
                     return window::close(id);
                 }
                 return Task::none();
@@ -207,6 +317,29 @@ impl Launcher {
         }
         refresh
     }
+    fn save_account(&mut self) -> Task<Message> {
+        if self.state.page != Page::Accounts
+            || self.state.loading_local
+            || self.state.saving_account
+        {
+            return Task::none();
+        }
+        let name = self.state.account_input.clone();
+        if let Err(error) = crate::account::validate_name(&name) {
+            self.state.account_status = format!("Invalid username. {error}.");
+            return Task::none();
+        }
+        self.state.saving_account = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || game::save_account(&name))
+                    .await
+                    .unwrap_or_else(|_| Err("Could not finish saving the offline account.".into()))
+            },
+            Message::OfflineSaved,
+        )
+    }
+
     fn family(&self) -> &'static str {
         VERSIONS[self.state.selected].cover
     }
@@ -288,6 +421,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn home_play_waits_for_an_account_and_prevents_duplicate_launches() {
+        let mut launcher = Launcher::default();
+        let _ = launcher.update(Message::LocalReady(vec!["1.20"], Ok(None)));
+        let _ = launcher.update(Message::Press(Control::StartDownload));
+        assert_eq!(launcher.state.page, Page::Accounts);
+        assert!(!launcher.state.launch.active());
+
+        let _ = launcher.update(Message::OfflineSaved(Ok("OfflinePlayer".into())));
+        let _ = launcher.update(Message::Press(Control::Nav(Page::Home)));
+        let _ = launcher.update(Message::Focus(false));
+        let _ = launcher.update(Message::Activate);
+        assert_eq!(launcher.state.launch.version, Some("1.20"));
+        assert!(launcher.state.launch.active());
+        assert!(!launcher.state.tabs().contains(&Control::StartDownload));
+        let _ = launcher.update(Message::Press(Control::StartDownload));
+        assert!(!launcher.state.installation.is_active());
+        let _ = launcher.update(Message::Launch(launch::Event::Finished(Err(
+            launch::Error::Installation {
+                message: "Damaged".into(),
+                repairable: true,
+            },
+        ))));
+        assert!(launcher.state.launch.repair);
+        assert!(!launcher.state.launch.active());
+        assert!(launcher.state.tabs().contains(&Control::StartDownload));
     }
 
     #[test]

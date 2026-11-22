@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, Metadata},
+    fs::{self, File, Metadata, OpenOptions, TryLockError},
     io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
@@ -44,17 +44,84 @@ impl GameDirectory {
             ensure_directory(&self.root.join(name))?;
         }
         ensure_directory(&self.root.join("assets/indexes"))?;
+        ensure_directory(&self.log_configs())?;
         ensure_directory(&self.metadata_cache())
+    }
+
+    /// Prepares only the root and configuration directory, so saving an
+    /// account does not require the full installation layout.
+    pub(crate) fn prepare_config(&self) -> io::Result<()> {
+        ensure_directory(&self.root)?;
+        ensure_directory(&self.root.join("config"))
     }
 
     pub(crate) fn metadata_cache(&self) -> PathBuf {
         self.root.join("cache/mojang")
     }
 
+    /// Persisted account configuration. Never holds tokens, only the offline
+    /// username; Microsoft secrets must use operating-system credential storage.
+    pub(crate) fn account_file(&self) -> PathBuf {
+        self.root.join("config/account.json")
+    }
+
+    /// Mojang logging configuration files named by version metadata.
+    pub(crate) fn log_configs(&self) -> PathBuf {
+        self.root.join("assets/log_configs")
+    }
+
+    pub(crate) fn log_config(&self, id: &str) -> PathBuf {
+        self.log_configs().join(id)
+    }
+
+    /// Launcher-owned game logs, including captured Minecraft output.
+    pub(crate) fn logs(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
+    /// Serializes installs and launches for this game root across launcher processes.
+    pub(crate) fn lock_operation(&self) -> io::Result<File> {
+        self.prepare_config()?;
+        let path = self.root.join("config/game.lock");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() || is_link(&metadata) => {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        lock.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => io::Error::new(
+                ErrorKind::WouldBlock,
+                "Minecraft is already running or another launcher is busy",
+            ),
+            TryLockError::Error(error) => error,
+        })?;
+        Ok(lock)
+    }
+
     pub(crate) fn version_directory(&self, version: &str) -> io::Result<PathBuf> {
-        let path = self.root.join("versions").join(version);
+        let path = self.version_path(version);
         ensure_directory(&path)?;
         Ok(path)
+    }
+
+    /// Path of a version directory without creating it, for readiness checks.
+    pub(crate) fn version_path(&self, version: &str) -> PathBuf {
+        self.root.join("versions").join(version)
+    }
+
+    /// The launcher-owned game directory used as `--gameDir` and working
+    /// directory: saves, screenshots and resource packs live here.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     pub(crate) fn asset_index(&self, id: &str) -> PathBuf {
@@ -167,6 +234,19 @@ mod tests {
             fs::read_to_string(game.root.join("versions")).unwrap(),
             "user file"
         );
+    }
+
+    #[test]
+    fn only_one_game_operation_can_hold_the_root_lock() {
+        let base = tempfile::tempdir().unwrap();
+        let game = GameDirectory::for_test(base.path());
+        let lock = game.lock_operation().unwrap();
+        assert_eq!(
+            game.lock_operation().unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+        drop(lock);
+        assert!(game.lock_operation().is_ok());
     }
 
     #[cfg(unix)]

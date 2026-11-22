@@ -1,8 +1,10 @@
+mod account;
 mod app;
 mod catalog;
 pub mod download;
 mod game_directory;
 mod http;
+mod launch;
 mod message;
 mod mojang;
 mod theme;

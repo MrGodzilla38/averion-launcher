@@ -1,10 +1,9 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use super::installation::Installation;
 use crate::{
     catalog::{VERSIONS, families, patches},
     message::{Control, Page},
-    mojang::Runtime,
 };
 
 pub struct State {
@@ -16,7 +15,14 @@ pub struct State {
     pub version_family: Option<usize>,
     pub motion: bool,
     pub installation: Installation,
-    pub verified_versions: HashMap<&'static str, Runtime>,
+    pub installed: HashSet<&'static str>,
+    pub loading_local: bool,
+    pub closing_after_game: bool,
+    pub launch: super::game::Launch,
+    pub account_name: Option<String>,
+    pub account_input: String,
+    pub account_status: String,
+    pub saving_account: bool,
     details_visible: bool,
 }
 
@@ -34,7 +40,14 @@ impl Default for State {
             version_family: None,
             motion: true,
             installation: Installation::default(),
-            verified_versions: HashMap::new(),
+            installed: HashSet::new(),
+            loading_local: false,
+            closing_after_game: false,
+            launch: super::game::Launch::default(),
+            account_name: None,
+            account_input: String::new(),
+            account_status: String::new(),
+            saving_account: false,
             details_visible: false,
         }
     }
@@ -46,6 +59,10 @@ impl State {
     }
     pub fn toggle_details(&mut self) {
         self.details_visible = !self.details_visible;
+    }
+
+    pub fn home_action_enabled(&self) -> bool {
+        !self.loading_local && !self.installation.is_active() && !self.launch.active()
     }
 
     pub fn tabs(&self) -> Vec<Control> {
@@ -68,16 +85,19 @@ impl State {
         match self.page {
             Page::Home => {
                 order.push(Control::VersionPreview);
-                if !self.installation.is_active() {
+                if self.home_action_enabled() {
                     order.push(Control::StartDownload);
                 }
-                if self.installation.has_action() {
+                if self.installation.has_action() && !self.launch.active() {
                     order.push(Control::DownloadAction);
                 }
                 order.extend([Control::Details, Control::News]);
             }
             Page::Versions => order.extend((0..families().count()).map(Control::VersionFamily)),
             Page::Settings => order.push(Control::Motion),
+            Page::Accounts if !self.loading_local && !self.saving_account => {
+                order.extend([Control::OfflineName, Control::SaveOffline]);
+            }
             _ => {}
         }
         order
@@ -170,7 +190,10 @@ impl State {
                 self.motion = !self.motion;
             }
             Control::VersionPreview => self.navigate(Page::Versions),
-            Control::StartDownload | Control::DownloadAction => {}
+            Control::StartDownload
+            | Control::DownloadAction
+            | Control::OfflineName
+            | Control::SaveOffline => {}
         }
     }
 }

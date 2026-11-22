@@ -118,11 +118,29 @@ async fn probe(executable: &Path) -> std::io::Result<Option<u16>> {
     let mut command = Command::new(executable);
     command
         .args(["-XshowSettings:properties", "-version"])
+        .current_dir(scratch.path());
+    configure(&mut command);
+
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    // Read both streams concurrently so neither pipe can stall the process.
+    let (stdout, stderr) = futures::try_join!(read_output(stdout), read_output(stderr))?;
+    if stdout.len() as u64 > MAX_OUTPUT
+        || stderr.len() as u64 > MAX_OUTPUT
+        || !child.wait().await?.success()
+    {
+        return Ok(None);
+    }
+    Ok(parse(&stdout, &stderr))
+}
+
+pub(crate) fn configure(command: &mut Command) {
+    command
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .current_dir(scratch.path());
+        .kill_on_drop(true);
     for variable in [
         "JAVA_TOOL_OPTIONS",
         "_JAVA_OPTIONS",
@@ -138,19 +156,6 @@ async fn probe(executable: &Path) -> std::io::Result<Option<u16>> {
     }
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-
-    let mut child = command.spawn()?;
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = child.stderr.take().expect("stderr is piped");
-    // Read both streams concurrently so neither pipe can stall the process.
-    let (stdout, stderr) = futures::try_join!(read_output(stdout), read_output(stderr))?;
-    if stdout.len() as u64 > MAX_OUTPUT
-        || stderr.len() as u64 > MAX_OUTPUT
-        || !child.wait().await?.success()
-    {
-        return Ok(None);
-    }
-    Ok(parse(&stdout, &stderr))
 }
 
 async fn read_output(pipe: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {

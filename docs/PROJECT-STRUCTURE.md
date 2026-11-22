@@ -23,6 +23,10 @@ src/
   app.rs                   Iced update and view delegation, message-path test
   app/installation.rs      Active download plan, cancellation, retry and progress updates
   app/state.rs             Route, selection, focus order, preferences and disclosure tests
+  account.rs               Offline profile validation, UUIDs and persistence
+  app/game.rs              Local account and installation discovery, launch status
+  launch.rs                Process ownership, output capture and exit reporting
+  launch/arguments.rs       JVM and game argument resolution
   catalog.rs               Local sample IDs and deterministic scene lookup
   download.rs              Sequential transfers, byte progress and safe publication
   download/batch.rs        Bounded parallel verification and aggregate progress
@@ -31,6 +35,8 @@ src/
   game_directory.rs        Managed Linux and Windows data layout
   http.rs                  Shared HTTPS transport and request limits
   mojang.rs                Mojang manifest, release validation and download planning
+  mojang/arguments.rs      Mojang launch argument metadata and feature/OS rules
+  mojang/record.rs         Verified per-version installation records
   mojang/assets.rs         Bounded parsing and hash-based asset object plans
   mojang/cache.rs          Bounded, staged metadata cache
   mojang/java.rs           Runtime requirements, Mojang catalog and managed reuse
@@ -48,11 +54,11 @@ src/
   ui/
     mod.rs                 Shared shell, navigation and controls
     input.rs               Iced keyboard event translation and tests
-    home.rs                Selected scene, Versions entry card, download status and F1 disclosure
+    home.rs                Selected scene, Versions entry card, download and launch status and F1 disclosure
     pages.rs               Six secondary destinations and announcement rows
     art.rs                 Stable handles for offline artwork and icons
 assets/terrain/            Original generated RGBA foreground/background plates and authoring script
 assets/icons/              Original icon strip and its vector source
 ```
 
-The download manager and Mojang resolver are independent of the UI. The application bridges selected-version resolution and downloads into Iced messages. Future domain and infrastructure modules are listed in the [growth map](PROPOSED-PROJECT-STRUCTURE.md#growth-map-once-a-feature-has-a-caller).
+The download manager and Mojang resolver are independent of the UI. The application bridges install and launch events into Iced messages. Future domain and infrastructure modules are listed in the [growth map](PROPOSED-PROJECT-STRUCTURE.md#growth-map-once-a-feature-has-a-caller).

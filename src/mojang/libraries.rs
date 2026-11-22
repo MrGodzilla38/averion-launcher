@@ -1,4 +1,9 @@
-use super::{Artifact, ArtifactJson, Error, Https, natives::NativeArchive, safe_path};
+use super::{
+    Artifact, ArtifactJson, CheckedFile, Error, Https,
+    arguments::{self, Rule},
+    natives::NativeArchive,
+    safe_path,
+};
 use crate::{
     download::{Cancellation, Download},
     game_directory::checked_subdirectory,
@@ -9,7 +14,7 @@ use std::{collections::BTreeMap, path::Path};
 const LIBRARY_HOSTS: &[&str] = &["libraries.minecraft.net"];
 
 #[derive(Clone, Copy)]
-pub(super) struct Platform {
+pub(crate) struct Platform {
     pub os: &'static str,
 }
 
@@ -65,61 +70,16 @@ struct LibraryFile {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Rule {
-    action: Action,
-    os: Option<OsRule>,
-    #[serde(default)]
-    features: BTreeMap<String, bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Action {
-    Allow,
-    Disallow,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OsRule {
-    name: Option<String>,
-    arch: Option<String>,
-    version: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Extract {
     #[serde(default)]
     exclude: Vec<String>,
 }
 
 fn allowed(rules: Option<&[Rule]>, platform: Platform) -> Result<bool, Error> {
-    let Some(rules) = rules else {
-        return Ok(true);
-    };
-    let mut allowed = false;
-    for rule in rules {
-        // This phase installs the base game with no optional launch features enabled.
-        if rule.features.values().any(|&enabled| enabled) {
-            continue;
-        }
-        if let Some(os) = &rule.os {
-            if os.name.as_deref().is_some_and(|name| name != platform.os) {
-                continue;
-            }
-            match os.arch.as_deref() {
-                None | Some("x86_64" | "amd64" | "x64") => {}
-                Some("x86" | "i386" | "i686" | "arm" | "arm32" | "arm64" | "aarch64") => continue,
-                Some(_) => return Err(Error::Invalid("unsupported library architecture rule")),
-            }
-            if os.version.is_some() {
-                return Err(Error::Invalid("unsupported library OS-version rule"));
-            }
-        }
-        allowed = matches!(rule.action, Action::Allow);
+    match rules {
+        None => Ok(true),
+        Some(rules) => arguments::allowed(rules, platform, &[]),
     }
-    Ok(allowed)
 }
 
 pub(super) struct Libraries {
@@ -219,6 +179,41 @@ pub(super) fn resolve(
                 &mut seen,
                 &mut result,
             )?;
+        }
+    }
+    Ok(result)
+}
+
+pub(super) fn classpath(
+    libraries: Vec<Library>,
+    platform: Platform,
+    root: &Path,
+) -> Result<Vec<CheckedFile>, Error> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for library in libraries {
+        if !allowed(library.rules.as_deref(), platform)? {
+            continue;
+        }
+        // Only the main artifact joins the classpath. Legacy natives live in
+        // `downloads.classifiers` and are extracted instead, while modern
+        // natives JARs are ordinary artifacts that stay on the classpath.
+        let Some(artifact) = library.downloads.artifact else {
+            continue;
+        };
+        let path = safe_path(&artifact.path)?;
+        if path.extension().and_then(|suffix| suffix.to_str()) != Some("jar")
+            || path.components().count() < 2
+        {
+            return Err(Error::Invalid("library JAR path"));
+        }
+        if seen.insert(artifact.path.to_ascii_lowercase()) {
+            let artifact = Artifact::validate(artifact.artifact, LIBRARY_HOSTS)?;
+            result.push(CheckedFile {
+                path: root.join(path),
+                size: artifact.size,
+                sha1: artifact.sha1,
+            });
         }
     }
     Ok(result)

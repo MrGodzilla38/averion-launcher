@@ -10,7 +10,7 @@ use serde::{
 use std::{
     collections::BTreeMap,
     fmt,
-    fs::File,
+    fs::{self, File},
     io::{BufReader, Read},
     path::Path,
 };
@@ -106,6 +106,57 @@ pub(super) fn resolve(
             directory.join(hash),
             https,
         ));
+    }
+    Ok(())
+}
+
+/// Re-checks that every asset object the index names exists with the recorded
+/// size. Used before launch so a missing or truncated object is reported as a
+/// repairable installation problem instead of a broken game.
+pub(super) fn validate(index: &Path, root: &Path, cancel: &Cancellation) -> Result<(), Error> {
+    let file = File::open(index).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Error::Damaged("asset index is missing".into())
+        } else {
+            Error::directory(error)
+        }
+    })?;
+    if file.metadata().map_err(Error::directory)?.len() > INDEX_LIMIT {
+        return Err(Error::Invalid("asset index size limit"));
+    }
+    let index: Index = serde_json::from_reader(BufReader::new(file.take(INDEX_LIMIT + 1)))
+        .map_err(|_| Error::Invalid("asset index objects"))?;
+    if index.virtual_assets || index.map_to_resources || index.objects.is_empty() {
+        return Err(Error::Invalid("unsupported or empty asset index"));
+    }
+    let mut previous = None;
+    let mut directory = root.to_owned();
+    for (sha1, size) in index.objects {
+        cancel.check()?;
+        let hash = hex_sha1(&sha1);
+        if previous != Some(sha1[0]) {
+            directory = root.join(&hash[..2]);
+            if !directory.symlink_metadata().is_ok_and(|metadata| {
+                metadata.is_dir() && !crate::game_directory::is_link(&metadata)
+            }) {
+                return Err(Error::Damaged(format!("asset directory {}", &hash[..2])));
+            }
+            previous = Some(sha1[0]);
+        }
+        let path = directory.join(&hash);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !crate::game_directory::is_link(&metadata)
+                    && metadata.len() == size => {}
+            Ok(_) => {
+                return Err(Error::Damaged(format!("asset object {}", &hash[..12])));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::Damaged(format!("asset object {}", &hash[..12])));
+            }
+            Err(error) => return Err(Error::directory(error)),
+        }
     }
     Ok(())
 }

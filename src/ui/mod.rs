@@ -72,7 +72,16 @@ fn navigation(state: &State, arrival: f32) -> View {
         Control::Profile,
         row![
             art::icon(8, 24),
-            column![bold("Profile", 14), text("Signed out").size(12).color(SUB)]
+            column![
+                bold("Profile", 14),
+                text(if state.account_name.is_some() {
+                    "Offline"
+                } else {
+                    "Signed out"
+                })
+                .size(12)
+                .color(SUB)
+            ]
         ]
         .spacing(6)
         .align_y(Alignment::Center),

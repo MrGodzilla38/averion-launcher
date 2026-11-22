@@ -37,6 +37,7 @@ pub(crate) enum Request {
     Prepared(Arc<[Download]>),
     Selected {
         version: &'static str,
+        repair: bool,
         mojang: Mojang,
     },
 }
@@ -64,9 +65,14 @@ impl Installation {
     pub fn start_selected(
         &mut self,
         version: &'static str,
+        repair: bool,
         mojang: Mojang,
     ) -> Option<impl Stream<Item = Event> + use<>> {
-        self.start_request(Request::Selected { version, mojang })
+        self.start_request(Request::Selected {
+            version,
+            repair,
+            mojang,
+        })
     }
 
     fn start_request(&mut self, request: Request) -> Option<impl Stream<Item = Event> + use<>> {
@@ -109,8 +115,12 @@ impl Installation {
                     .await
                     .map(|_| None)
                     .map_err(JobError::from),
-                Request::Selected { version, mojang } => mojang
-                    .install(version, &cancel, &report)
+                Request::Selected {
+                    version,
+                    repair,
+                    mojang,
+                } => mojang
+                    .install(version, repair, &cancel, &report)
                     .await
                     .map(Some)
                     .map_err(|error| match error {
@@ -199,10 +209,16 @@ mod tests {
     fn selected_release_resolution_can_be_cancelled_before_io() {
         block_on(async {
             let mut job = Installation::default();
-            let mut events = pin!(job.start_selected("1.21", Mojang::default()).unwrap());
+            let mut events = pin!(
+                job.start_selected("1.21", false, Mojang::default())
+                    .unwrap()
+            );
             assert!(matches!(&job, Installation::Active { progress, .. }
                 if progress.component.as_ref() == "Minecraft 1.21" && progress.stage == Stage::Resolving));
-            assert!(job.start_selected("1.20", Mojang::default()).is_none());
+            assert!(
+                job.start_selected("1.20", false, Mojang::default())
+                    .is_none()
+            );
             job.cancel();
             let event = events.next().await.unwrap();
             assert!(matches!(&event, Event::Finished(Err(error)) if error.cancelled));
@@ -214,7 +230,9 @@ mod tests {
     #[test]
     fn selected_version_is_reported_complete_only_on_success() {
         let mut job = Installation::default();
-        let _events = job.start_selected("1.20", Mojang::default()).unwrap();
+        let _events = job
+            .start_selected("1.20", false, Mojang::default())
+            .unwrap();
         assert_eq!(
             job.update(Event::Finished(Err(JobError {
                 message: "invalid native archive".into(),

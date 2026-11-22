@@ -129,14 +129,37 @@ pub(super) fn view(state: &State) -> View {
 fn launch_control(state: &State) -> View {
     let active = state.installation.is_active();
     let width = if state.compact { 210 } else { 246 };
-    let label = text(if active { "INSTALLING" } else { "DOWNLOAD" })
-        .size(20)
-        .font(iced::Font::with_name("Minecraft"));
+    let version = VERSIONS[state.selected].id;
+    let installed = state.installed.contains(version);
+    let launch = &state.launch;
+    let label = text(if state.loading_local {
+        "LOADING"
+    } else if active {
+        "INSTALLING"
+    } else if launch.active() {
+        if launch.running {
+            "RUNNING"
+        } else {
+            "STARTING"
+        }
+    } else if launch.version == Some(version) && launch.repair {
+        "REPAIR"
+    } else if installed {
+        "PLAY"
+    } else {
+        "DOWNLOAD"
+    })
+    .size(20)
+    .font(iced::Font::with_name("Minecraft"));
     let focused = state.focus == Control::StartDownload;
     let main = button(container(label).center(Fill))
         .width(width)
         .height(if state.compact { 44 } else { 52 })
-        .on_press_maybe((!active).then_some(Message::Press(Control::StartDownload)))
+        .on_press_maybe(
+            state
+                .home_action_enabled()
+                .then_some(Message::Press(Control::StartDownload)),
+        )
         .style(move |_, state| {
             let (fill, ink) = match state {
                 button::Status::Disabled => (SELECTED, MUTED),
@@ -158,16 +181,26 @@ fn launch_control(state: &State) -> View {
     let controls = column![main].spacing(4).align_x(Alignment::Center);
     let controls = match &state.installation {
         Installation::Idle => {
-            let version = VERSIONS[state.selected].id;
-            let status = if let Some(runtime) = state.verified_versions.get(version) {
-                format!(
-                    "Minecraft {version} files verified. Java {} ready.",
-                    runtime.major
-                )
+            let status = if launch.active() || launch.version == Some(version) {
+                if state.closing_after_game {
+                    format!(
+                        "{} Averion will close after Minecraft exits.",
+                        launch.status
+                    )
+                } else {
+                    launch.status.clone()
+                }
+            } else if state.loading_local {
+                "Reading local installations…".into()
+            } else if installed {
+                format!("Minecraft {version} is installed.")
             } else {
                 "Download and verify the selected Minecraft version.".into()
             };
             controls.push(text(status).size(14).color(MUTED))
+        }
+        Installation::Failed { .. } if launch.active() => {
+            controls.push(text(launch.status.clone()).size(14).color(MUTED))
         }
         Installation::Failed { error, .. } => controls
             .push(text(error.to_string()).size(14).color(MUTED))

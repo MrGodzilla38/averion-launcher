@@ -102,3 +102,26 @@ fn verifies_archive_digest_and_respects_cancellation_before_publication() {
     );
     assert!(!base.path().join("natives").exists());
 }
+
+#[test]
+fn assembles_nested_lwjgl_native_paths() {
+    let base = tempfile::tempdir().unwrap();
+    let version = base.path();
+    let archive = "fixture-archive";
+    let relative = PathBuf::from("linux/x64/org/lwjgl/liblwjgl.so");
+    let original = version.join("natives").join(archive).join(&relative);
+    fs::create_dir_all(original.parent().unwrap()).unwrap();
+    fs::write(original, b"native fixture").unwrap();
+    let (_sender, cancel) = crate::download::cancellation();
+    let outputs = assemble(
+        version,
+        &[(archive.into(), vec![relative.clone()])],
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(outputs[0].0, PathBuf::from("natives/launch").join(relative));
+    assert_eq!(
+        fs::read(version.join(&outputs[0].0)).unwrap(),
+        b"native fixture"
+    );
+}

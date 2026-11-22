@@ -11,6 +11,8 @@ const MANIFEST_FILE: &str = "version-manifest-v2.cache";
 fn version_json() -> Value {
     json!({
         "id": SELECTED,
+        "mainClass": "net.minecraft.client.main.Main",
+        "minecraftArguments": "--username ${auth_player_name}",
         "type": "release",
         "javaVersion": {"component":"java-runtime-gamma","majorVersion":17},
         "downloads": {"client": {
@@ -297,7 +299,7 @@ fn official_https_complete_installation() {
         let (_sender, cancel) = download::cancellation();
         let report = |_: Progress| future::ready(()).boxed();
         mojang
-            .install_in("1.16", &directory, &cancel, &report)
+            .install_in("1.16", &directory, false, &cancel, &report)
             .await
             .unwrap();
         let version = directory.version_directory("1.16").unwrap();
@@ -320,7 +322,7 @@ fn official_https_complete_installation() {
             }
         };
         mojang
-            .install_in("1.16", &directory, &cancel, &report)
+            .install_in("1.16", &directory, false, &cancel, &report)
             .await
             .unwrap();
         assert!(!network_read.load(Ordering::Relaxed));
@@ -383,6 +385,10 @@ fn an_invalid_native_archive_prevents_completion_after_verified_downloads() {
     let plan = InstallationPlan {
         index,
         files: vec![client, native],
+        metadata: Vec::new(),
+        metadata_sha1: [0; 20],
+        logging: None,
+        repair: false,
         natives: vec![native_archive],
         version_dir,
         platform: Platform::current().unwrap(),
@@ -397,4 +403,53 @@ fn an_invalid_native_archive_prevents_completion_after_verified_downloads() {
         block_on(Mojang::default().execute(SELECTED, &directory, plan, &cancel, &report)),
         Err(Error::Native("invalid ZIP archive"))
     ));
+}
+
+#[test]
+fn prepares_legacy_game_and_detects_same_size_classpath_damage() {
+    let base = tempfile::tempdir().unwrap();
+    let directory = GameDirectory::for_test(base.path());
+    directory.prepare().unwrap();
+    let version_dir = directory.version_directory(SELECTED).unwrap();
+    fs::create_dir_all(version_dir.join("natives/launch")).unwrap();
+    let client = version_dir.join("1.20.jar");
+    fs::write(&client, b"abc").unwrap();
+    let library = directory
+        .libraries()
+        .join("com/example/fixture/1/fixture-1.jar");
+    fs::create_dir_all(library.parent().unwrap()).unwrap();
+    fs::write(&library, b"abc").unwrap();
+    let assets = json!({"objects": {"fixture/asset": {"hash":HASH,"size":3}}}).to_string();
+    fs::write(directory.asset_index("5"), &assets).unwrap();
+    let object = directory.asset_objects().unwrap().join("a9").join(HASH);
+    fs::create_dir_all(object.parent().unwrap()).unwrap();
+    fs::write(object, b"abc").unwrap();
+
+    let mut metadata = version_json();
+    metadata["assetIndex"]["size"] = json!(assets.len());
+    metadata["assetIndex"]["sha1"] = json!(hex_sha1(&digest(assets.as_bytes())));
+    let metadata = serde_json::to_vec(&metadata).unwrap();
+    let record = Record {
+        schema: record::SCHEMA,
+        version: SELECTED.into(),
+        metadata_sha1: hex_sha1(&digest(&metadata)),
+        runtime: Runtime {
+            executable: base.path().join("java"),
+            major: 17,
+        },
+        natives: vec![],
+        log_config: None,
+    };
+    record::write(&version_dir, SELECTED, &metadata, &record).unwrap();
+    let prepared = prepare(&directory, SELECTED).unwrap();
+    assert!(prepared.arguments.game.is_none());
+    assert_eq!(
+        prepared.legacy.as_deref(),
+        Some("--username ${auth_player_name}")
+    );
+    assert_eq!(prepared.classpath, [client, library.clone()]);
+    let (_keep_active, cancel) = download::cancellation();
+    verify(&prepared, &cancel).unwrap();
+    fs::write(&library, b"bad").unwrap();
+    assert!(matches!(verify(&prepared, &cancel), Err(Error::Damaged(_))));
 }

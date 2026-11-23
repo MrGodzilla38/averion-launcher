@@ -11,6 +11,7 @@ macro_rules! versions {
     };
 }
 
+// Keep stable releases newest first. The first entry is the startup default.
 pub const VERSIONS: &[Version] = versions![
     "26.3", "Wilderness Bound" => ["26.3"],
     "26.2", "Chaos Cubed" => ["26.2"],

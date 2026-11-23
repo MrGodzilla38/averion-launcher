@@ -14,7 +14,7 @@ pub use app::Launcher;
 pub use message::Message;
 
 pub fn run() -> iced::Result {
-    iced::application(Launcher::default, Launcher::update, Launcher::view)
+    iced::application(Launcher::boot, Launcher::update, Launcher::view)
         .font(include_bytes!("../assets/fonts/Minecraft.ttf").as_slice())
         .title("Averion Launcher")
         .theme(theme::dark())

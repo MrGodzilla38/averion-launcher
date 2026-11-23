@@ -4,6 +4,8 @@ Averion is a native desktop launcher for Minecraft Java Edition on x86_64 Linux 
 
 ## Install and play
 
+On first launch, Averion selects the newest stable Minecraft release in its built-in catalog. Later launches restore the last selected release. If that release is unavailable in the catalog, Averion uses the newest listed release until you choose a version.
+
 1. Open **Versions**, choose a version family, then select a Minecraft release. The built-in catalog lists 35 releases from 1.16.5 through 26.3. Installation requires compatible builds of Fabric Loader, Fabric API and Averion Client for the exact release.
 2. Select **Download** on **Home**. Averion downloads and verifies the game files, extracts native libraries and uses Mojang metadata to select the required Java version. It reuses a compatible 64-bit system Java installation or downloads Mojang's runtime. **Home** shows progress and offers **Cancel** during installation or **Retry** after a failure.
 3. Open **Profile** from the top-right profile button. Enter a username with 3–16 ASCII letters, digits or underscores and choose **Save offline profile**. Select **Use account** to switch to another saved profile. Offline profiles support local play.
@@ -36,6 +38,7 @@ Averion stores its data under `~/.averion/` on Linux and `%APPDATA%\.averion\` o
 | `saves/` | Local worlds |
 | `versions/<version>/` | Per-version game files and managed Fabric stack |
 | `profiles/<version>/mods/` | Manually installed mods for that version |
+| `config/selected-version` | Last selected Minecraft release |
 | `java/` | Java runtimes downloaded by Averion |
 | `logs/minecraft-*/` | Captured output for each Minecraft launch |
 

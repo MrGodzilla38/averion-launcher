@@ -267,7 +267,14 @@ fn launch_control(state: &State) -> View {
                 )
         }
     };
-    controls.into()
+    controls
+        .extend(
+            state
+                .version_selection_error
+                .clone()
+                .map(|error| View::from(text(error).size(14).color(MUTED))),
+        )
+        .into()
 }
 
 fn launch_button_style(

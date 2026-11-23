@@ -11,6 +11,7 @@ pub(crate) const MICROSOFT_SIGN_IN_ENABLED: bool = false;
 pub struct State {
     pub page: Page,
     pub selected: usize,
+    pub version_selection_error: Option<String>,
     pub focus: Control,
     pub compact: bool,
     pub menu: bool,
@@ -36,10 +37,8 @@ impl Default for State {
     fn default() -> Self {
         Self {
             page: Page::Home,
-            selected: VERSIONS
-                .iter()
-                .position(|entry| entry.id == "1.20")
-                .unwrap_or(0),
+            selected: 0,
+            version_selection_error: None,
             focus: Control::VersionPreview,
             compact: false,
             menu: false,
@@ -251,10 +250,8 @@ mod tests {
         for entry in [Control::VersionPreview, Control::Nav(Page::Versions)] {
             let mut state = State::default();
             let initial = state.selected;
-            assert_eq!(super::VERSIONS[initial].id, "1.20");
-            let initial_family = super::families()
-                .position(|family| family.cover == "1.20")
-                .unwrap();
+            assert_eq!(initial, 0);
+            let initial_family = 0;
             let nether_family = super::families()
                 .position(|family| family.cover == "1.16")
                 .unwrap();

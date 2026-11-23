@@ -3,10 +3,12 @@ mod game;
 pub(crate) mod installation;
 mod profile_skin;
 pub(crate) mod state;
+mod version_selection;
 
 use crate::{
     catalog::VERSIONS,
     download::Download,
+    game_directory::GameDirectory,
     launch,
     message::{Control, Message, Page},
     mojang::Mojang,
@@ -37,6 +39,7 @@ pub struct Launcher {
     close_after_activity: Option<window::Id>,
     read_local_started: bool,
     sign_in_cancel: Option<futures::channel::oneshot::Sender<()>>,
+    selection_directory: Option<GameDirectory>,
 }
 
 enum AccountMutation {
@@ -46,6 +49,47 @@ enum AccountMutation {
 }
 
 impl Launcher {
+    pub(crate) fn boot() -> Self {
+        Self::with_version_selection(GameDirectory::discover())
+    }
+
+    fn with_version_selection(directory: std::io::Result<GameDirectory>) -> Self {
+        let mut launcher = Self::default();
+        match directory {
+            Ok(directory) => {
+                match version_selection::restore_or_initialize(&directory) {
+                    Ok(selected) => launcher.state.selected = selected,
+                    Err(error) => {
+                        launcher.state.version_selection_error =
+                            Some(format!("Could not restore the selected version ({error})."));
+                    }
+                }
+                launcher.selection_directory = Some(directory);
+            }
+            Err(error) => {
+                launcher.state.version_selection_error = Some(format!(
+                    "Could not find the Averion data directory ({error})."
+                ));
+            }
+        }
+        launcher
+    }
+
+    fn press(&mut self, control: Control) {
+        let selecting =
+            matches!(control, Control::Version(_)) && self.state.version_family.is_some();
+        self.state.press(control);
+        if selecting
+            && self.state.version_family.is_none()
+            && let Some(directory) = &self.selection_directory
+        {
+            self.state.version_selection_error =
+                version_selection::save(directory, VERSIONS[self.state.selected].id)
+                    .err()
+                    .map(|error| format!("Could not save the selected version ({error})."));
+        }
+    }
+
     /// Starts a validated plan from an installation workflow.
     pub fn start_downloads(&mut self, plan: Vec<Download>) -> Task<Message> {
         if !self.state.home_action_enabled() {
@@ -203,7 +247,7 @@ impl Launcher {
                 self.state.mods_status = result.err().unwrap_or_default();
                 return Task::none();
             }
-            Message::Press(control) => self.state.press(control),
+            Message::Press(control) => self.press(control),
             Message::Focus(backwards) => {
                 self.state.cycle(backwards);
                 if self.state.page == Page::Accounts {
@@ -324,7 +368,7 @@ impl Launcher {
             Message::Activate if self.state.focus == Control::DownloadAction => {
                 return self.download_action();
             }
-            Message::Activate => self.state.press(self.state.focus),
+            Message::Activate => self.press(self.state.focus),
             Message::Escape
                 if self.state.page == Page::Accounts && self.state.sign_in_cancellable =>
             {
@@ -625,6 +669,64 @@ mod tests {
     use crate::account::microsoft::{Error as SignInError, Stage as SignInStage};
 
     #[test]
+    fn startup_remembers_the_version_selected_by_pointer_or_keyboard() {
+        let base = tempfile::tempdir().unwrap();
+        let directory = GameDirectory::for_test(base.path());
+        let mut launcher = Launcher::with_version_selection(Ok(directory.clone()));
+        assert_eq!(launcher.state.selected, 0);
+        let saved = directory.root().join("config/selected-version");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), VERSIONS[0].id);
+
+        for (id, keyboard) in [("1.20.1", false), ("1.21.10", true)] {
+            let index = VERSIONS
+                .iter()
+                .position(|version| version.id == id)
+                .unwrap();
+            let family = crate::catalog::families()
+                .position(|family| family.cover == VERSIONS[index].cover)
+                .unwrap();
+            let _ = launcher.update(Message::Press(Control::VersionPreview));
+            let _ = launcher.update(Message::Press(Control::VersionFamily(family)));
+            if keyboard {
+                let _ = launcher.update(Message::Focus(false));
+                assert_eq!(launcher.state.focus, Control::Version(index));
+                let _ = launcher.update(Message::Activate);
+            } else {
+                let _ = launcher.update(Message::Press(Control::Version(index)));
+            }
+            assert_eq!(launcher.state.page, Page::Home);
+            assert!(launcher.state.version_selection_error.is_none());
+            assert_eq!(std::fs::read_to_string(&saved).unwrap(), id);
+
+            launcher = Launcher::with_version_selection(Ok(directory.clone()));
+            assert_eq!(launcher.state.selected, index);
+            assert!(launcher.state.version_selection_error.is_none());
+        }
+    }
+
+    #[test]
+    fn startup_preserves_unavailable_saved_versions_until_an_explicit_selection() {
+        let base = tempfile::tempdir().unwrap();
+        let directory = GameDirectory::for_test(base.path());
+        directory.prepare_config().unwrap();
+        let saved = directory.root().join("config/selected-version");
+        std::fs::write(&saved, "99.1").unwrap();
+
+        let mut launcher = Launcher::with_version_selection(Ok(directory));
+        assert_eq!(launcher.state.selected, 0);
+        assert!(launcher.state.version_selection_error.is_some());
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "99.1");
+        let _ = launcher.update(Message::Press(Control::Version(0)));
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "99.1");
+
+        let _ = launcher.update(Message::Press(Control::VersionPreview));
+        let _ = launcher.update(Message::Press(Control::VersionFamily(0)));
+        let _ = launcher.update(Message::Press(Control::Version(0)));
+        assert!(launcher.state.version_selection_error.is_none());
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), VERSIONS[0].id);
+    }
+
+    #[test]
     fn disabled_microsoft_sign_in_cannot_be_focused_or_activated() {
         let mut launcher = Launcher::default();
         launcher.state.navigate(Page::Accounts);
@@ -695,6 +797,10 @@ mod tests {
     #[test]
     fn mods_update_uses_the_existing_installation_workflow() {
         let mut launcher = Launcher::default();
+        launcher.state.selected = VERSIONS
+            .iter()
+            .position(|version| version.id == "1.20")
+            .unwrap();
         let _ = launcher.update(Message::LocalReady(
             vec!["1.20"],
             Ok(crate::account::Accounts::default()),
@@ -772,6 +878,10 @@ mod tests {
     #[test]
     fn home_play_waits_for_an_account_and_prevents_duplicate_launches() {
         let mut launcher = Launcher::default();
+        launcher.state.selected = VERSIONS
+            .iter()
+            .position(|version| version.id == "1.20")
+            .unwrap();
         let _ = launcher.update(Message::LocalReady(
             vec!["1.20"],
             Ok(crate::account::Accounts::default()),

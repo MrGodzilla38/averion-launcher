@@ -114,7 +114,7 @@ pub(super) fn view(state: &State) -> View {
     .spacing(8);
     let compact = state.compact;
     let width = if compact { 176 } else { 320 };
-    let mut portrait = column![art::profile_portrait(width, state.skin.image())]
+    let mut portrait = column![art::profile_portrait(width, state.skin.portraits())]
         .width(width)
         .align_x(Alignment::Center);
     if let Some(status) = state.skin.status() {

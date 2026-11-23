@@ -74,7 +74,7 @@ pub enum Message {
     AccountsUpdated(Result<crate::account::Accounts, String>, &'static str),
     ProfileSkinReady(
         u64,
-        Result<iced::widget::image::Handle, crate::account::skin::Error>,
+        Result<crate::ui::art::skin::Portraits, crate::account::skin::Error>,
     ),
     Launch(crate::launch::Event),
     WindowOpened(iced::window::Id, iced::Size),

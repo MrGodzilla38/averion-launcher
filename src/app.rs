@@ -149,16 +149,17 @@ impl Launcher {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let previous_page = self.state.page;
         let task = self.update_state(message);
         let name = self
             .state
             .accounts
             .active()
             .map(crate::account::Account::name);
-        let skin = self
-            .state
-            .skin
-            .sync(self.state.page == Page::Accounts, name);
+        let skin = self.state.skin.sync(
+            self.state.page == Page::Accounts && previous_page != Page::Accounts,
+            name,
+        );
         match skin {
             Some(skin) => Task::batch([task, skin]),
             None => task,

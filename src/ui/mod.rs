@@ -69,21 +69,17 @@ fn navigation(state: &State, arrival: f32) -> View {
     let brand = row![art::icon(7, 28), bold("Averion", 21)]
         .align_y(Alignment::Center)
         .spacing(6);
+    let account = state.accounts.active();
+    let nickname = account.map_or("Profile", crate::account::Account::name);
+    let auth = account.map_or("Signed out", |account| account.auth().label());
     let profile = action(
         state,
         Control::Profile,
         row![
-            art::icon(8, 24),
+            art::navigation_portrait(state.skin.portraits()),
             column![
-                bold("Profile", 14),
-                text(
-                    state
-                        .accounts
-                        .active()
-                        .map_or("Signed out", |account| account.auth().label())
-                )
-                .size(12)
-                .color(SUB)
+                bold(nickname.to_owned(), 14),
+                text(auth).size(12).color(SUB)
             ]
         ]
         .spacing(6)

@@ -63,21 +63,29 @@ pub fn icon(index: usize, size: u32) -> Image {
         .content_fit(ContentFit::Contain)
 }
 
-pub(super) fn profile_portrait(width: u32, skin: Option<&Handle>) -> Image {
-    static PORTRAIT: OnceLock<Handle> = OnceLock::new();
-    Image::new(
-        skin.unwrap_or_else(|| PORTRAIT.get_or_init(skin::fallback_portrait))
-            .clone(),
-    )
-    .width(width)
-    .height(width * 5 / 4)
-    .content_fit(ContentFit::Contain)
+fn portraits(skin: Option<&skin::Portraits>) -> &skin::Portraits {
+    static FALLBACK: OnceLock<skin::Portraits> = OnceLock::new();
+    skin.unwrap_or_else(|| FALLBACK.get_or_init(skin::fallback_portraits))
+}
+
+pub(super) fn profile_portrait(width: u32, skin: Option<&skin::Portraits>) -> Image {
+    Image::new(portraits(skin).profile.clone())
+        .width(width)
+        .height(width * 5 / 4)
+        .content_fit(ContentFit::Contain)
+}
+
+pub(super) fn navigation_portrait(skin: Option<&skin::Portraits>) -> Image {
+    Image::new(portraits(skin).navigation.clone())
+        .width(38)
+        .height(40)
+        .content_fit(ContentFit::Contain)
 }
 
 const PORTRAIT_WIDTH: u32 = 320;
 const PORTRAIT_HEIGHT: u32 = 400;
 
-fn finish_portrait(mut portrait: tiny_skia::Pixmap) -> Handle {
+fn finish_portrait(mut portrait: tiny_skia::Pixmap) -> tiny_skia::Pixmap {
     use tiny_skia::{
         BlendMode, Color, GradientStop, LinearGradient, Paint, Point, RadialGradient, Rect,
         SpreadMode, Transform,
@@ -124,6 +132,10 @@ fn finish_portrait(mut portrait: tiny_skia::Pixmap) -> Handle {
     };
     portrait.fill_rect(bounds, &glow, transform, None);
 
+    portrait
+}
+
+fn portrait_handle(portrait: &tiny_skia::Pixmap) -> Handle {
     // Iced image handles expect straight alpha.
     let rgba: Vec<_> = portrait
         .pixels()
@@ -133,5 +145,5 @@ fn finish_portrait(mut portrait: tiny_skia::Pixmap) -> Handle {
             [color.red(), color.green(), color.blue(), color.alpha()]
         })
         .collect();
-    Handle::from_rgba(PORTRAIT_WIDTH, PORTRAIT_HEIGHT, rgba)
+    Handle::from_rgba(portrait.width(), portrait.height(), rgba)
 }
